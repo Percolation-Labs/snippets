@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login - API Test Client</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        .nav { display: flex; gap: 10px; }
+        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
+        .nav a:hover { background: #e0e0e0; }
+        .section { margin-top: 20px; }
+        h1, h2 { margin-top: 0; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; }
+        input[type="text"], input[type="password"], input[type="email"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #45a049; }
+        .divider { margin: 20px 0; text-align: center; position: relative; }
+        .divider:before { content: ""; display: block; width: 100%; height: 1px; background: #ddd; position: absolute; top: 50%; }
+        .divider span { background: white; padding: 0 10px; position: relative; }
+        .social-button { display: block; width: 100%; padding: 10px; margin-bottom: 10px; text-align: center; background: #4285F4; color: white; text-decoration: none; border-radius: 4px; }
+        .social-button:hover { background: #3367D6; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Login</h1>
+            <div class="nav">
+                <a href="/">Home</a>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Email Login</h2>
+            <form method="post" action="/login">
+                <div class="form-group">
+                    <label for="username">Email:</label>
+                    <input type="email" id="username" name="username" required>
+                </div>
+                <div class="form-group">
+                    <label for="password">Password:</label>
+                    <input type="password" id="password" name="password" required>
+                </div>
+                <button type="submit">Login</button>
+            </form>
+            
+            <div class="divider">
+                <span>OR</span>
+            </div>
+            
+            <a href="/google-login" class="social-button">Login with Google</a>
+        </div>
+    </div>
+</body>
+</html>

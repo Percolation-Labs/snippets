@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Two-Factor Authentication - API Test Client</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        .nav { display: flex; gap: 10px; }
+        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
+        .nav a:hover { background: #e0e0e0; }
+        .section { margin-top: 20px; }
+        h1, h2 { margin-top: 0; }
+        .status { margin-bottom: 20px; padding: 15px; border-radius: 4px; }
+        .status.enabled { background-color: #e8f5e9; border: 1px solid #a5d6a7; }
+        .status.disabled { background-color: #ffebee; border: 1px solid #ffcdd2; }
+        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #45a049; }
+        button.danger { background: #f44336; }
+        button.danger:hover { background: #e53935; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Two-Factor Authentication</h1>
+            <div class="nav">
+                <a href="/">Home</a>
+                <a href="/profile">Profile</a>
+                <a href="/payments">Payments</a>
+                <a href="/products">Products</a>
+                <a href="/logout">Logout</a>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>2FA Status</h2>
+            {% if twofa_status.enabled %}
+                <div class="status enabled">
+                    <p><strong>2FA is enabled</strong> for your account.</p>
+                    <p>Your account is protected with two-factor authentication using an authenticator app.</p>
+                </div>
+                <form method="post" action="/2fa/disable">
+                    <button type="submit" class="danger">Disable 2FA</button>
+                </form>
+            {% else %}
+                <div class="status disabled">
+                    <p><strong>2FA is not enabled</strong> for your account.</p>
+                    <p>Enable two-factor authentication to add an extra layer of security to your account.</p>
+                </div>
+                <form method="post" action="/2fa/enable">
+                    <button type="submit">Enable 2FA</button>
+                </form>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

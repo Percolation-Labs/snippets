@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>API Test Client</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        .nav { display: flex; gap: 10px; }
+        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
+        .nav a:hover { background: #e0e0e0; }
+        .section { margin-top: 20px; }
+        h1, h2 { margin-top: 0; }
+        ul { padding-left: 20px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>API Test Client</h1>
+            <div class="nav">
+                {% if user %}
+                    <a href="/profile">Profile</a>
+                    <a href="/2fa">2FA</a>
+                    <a href="/payments">Payments</a>
+                    <a href="/products">Products</a>
+                    <a href="/logout">Logout</a>
+                {% else %}
+                    <a href="/login">Login</a>
+                {% endif %}
+            </div>
+        </div>
+        
+        {% if user %}
+            <div class="section">
+                <h2>Welcome, {{ user.display_name or user.email }}</h2>
+                <p>You are logged in. Use the navigation above to test different features.</p>
+            </div>
+        {% else %}
+            <div class="section">
+                <h2>Welcome to the API Test Client</h2>
+                <p>This client allows you to test various API flows:</p>
+                <ul>
+                    <li>Login with email and password</li>
+                    <li>Login with Google</li>
+                    <li>Update user profile</li>
+                    <li>Enable/manage 2FA</li>
+                    <li>Add payment methods</li>
+                    <li>Buy tokens</li>
+                    <li>Subscribe to plans</li>
+                </ul>
+                <p>Please <a href="/login">login</a> to get started.</p>
+            </div>
+        {% endif %}
+    </div>
+</body>
+</html>

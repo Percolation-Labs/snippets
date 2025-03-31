@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Setup Two-Factor Authentication - API Test Client</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        .nav { display: flex; gap: 10px; }
+        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
+        .nav a:hover { background: #e0e0e0; }
+        .section { margin-top: 20px; }
+        h1, h2, h3 { margin-top: 0; }
+        .steps { margin-bottom: 20px; }
+        .step { margin-bottom: 15px; }
+        .qr-container { text-align: center; margin: 20px 0; }
+        .qr-code { display: inline-block; padding: 10px; background: white; border: 1px solid #ddd; }
+        .secret-key { margin: 20px 0; padding: 10px; background: #f5f5f5; border-radius: 4px; font-family: monospace; text-align: center; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; }
+        input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
+        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #45a049; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Setup Two-Factor Authentication</h1>
+            <div class="nav">
+                <a href="/">Home</a>
+                <a href="/profile">Profile</a>
+                <a href="/2fa">Back to 2FA</a>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Setup Instructions</h2>
+            <div class="steps">
+                <div class="step">
+                    <h3>1. Scan QR Code</h3>
+                    <p>Use an authenticator app like Google Authenticator, Authy, or Microsoft Authenticator to scan the QR code below.</p>
+                </div>
+                
+                <div class="qr-container">
+                    <div class="qr-code">
+                        <img src="{{ twofa_setup.qr_code }}" alt="QR Code for 2FA">
+                    </div>
+                </div>
+                
+                <div class="step">
+                    <h3>2. Manual Setup</h3>
+                    <p>If you can't scan the QR code, you can manually enter this secret key in your authenticator app:</p>
+                    <div class="secret-key">{{ twofa_setup.secret }}</div>
+                </div>
+                
+                <div class="step">
+                    <h3>3. Verify Setup</h3>
+                    <p>Enter the 6-digit code from your authenticator app to verify the setup:</p>
+                    <form method="post" action="/2fa/verify">
+                        <div class="form-group">
+                            <label for="code">Authentication Code:</label>
+                            <input type="text" id="code" name="code" placeholder="000000" required>
+                        </div>
+                        <button type="submit">Verify</button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>

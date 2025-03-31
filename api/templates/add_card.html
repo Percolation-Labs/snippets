@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Add Payment Method - API Test Client</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://js.stripe.com/v3/"></script>
+    <style>
+        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
+        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; }
+        .nav { display: flex; gap: 10px; }
+        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
+        .nav a:hover { background: #e0e0e0; }
+        .section { margin-top: 20px; }
+        h1, h2 { margin-top: 0; }
+        #payment-form { max-width: 500px; }
+        .form-row { margin-bottom: 20px; }
+        label { display: block; margin-bottom: 5px; }
+        .StripeElement { background-color: white; padding: 10px 12px; border-radius: 4px; border: 1px solid #ddd; }
+        .StripeElement--focus { border-color: #80bdff; }
+        .StripeElement--invalid { border-color: #fa755a; }
+        .error-message { color: #fa755a; margin-top: 10px; }
+        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
+        button:hover { background: #45a049; }
+        button:disabled { background: #9E9E9E; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>Add Payment Method</h1>
+            <div class="nav">
+                <a href="/">Home</a>
+                <a href="/payments">Back to Payments</a>
+            </div>
+        </div>
+        
+        <div class="section">
+            <h2>Add Credit or Debit Card</h2>
+            <form id="payment-form">
+                <div class="form-row">
+                    <label for="card-element">Credit or debit card</label>
+                    <div id="card-element"></div>
+                    <div id="card-errors" class="error-message" role="alert"></div>
+                </div>
+                <button id="submit-button" type="submit">Add Card</button>
+            </form>
+        </div>
+    </div>
+    
+    <script>
+        // Initialize Stripe
+        const stripe = Stripe('{{ stripe_pk }}');
+        const elements = stripe.elements();
+        
+        // Create card element
+        const cardElement = elements.create('card');
+        cardElement.mount('#card-element');
+        
+        // Handle form submission
+        const form = document.getElementById('payment-form');
+        const submitButton = document.getElementById('submit-button');
+        const errorElement = document.getElementById('card-errors');
+        
+        form.addEventListener('submit', async (event) => {
+            event.preventDefault();
+            
+            // Disable submit button
+            submitButton.disabled = true;
+            submitButton.textContent = 'Processing...';
+            
+            // Create payment method
+            const { setupIntent, error } = await stripe.confirmCardSetup(
+                '{{ setup_intent.client_secret }}',
+                {
+                    payment_method: {
+                        card: cardElement,
+                    }
+                }
+            );
+            
+            if (error) {
+                // Show error to customer
+                errorElement.textContent = error.message;
+                submitButton.disabled = false;
+                submitButton.textContent = 'Add Card';
+            } else {
+                // Submit payment method ID to server
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '/payments/add-card';
+                
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'payment_method_id';
+                input.value = setupIntent.payment_method;
+                
+                form.appendChild(input);
+                document.body.appendChild(form);
+                form.submit();
+            }
+        });
+    </script>
+</body>
+</html>
