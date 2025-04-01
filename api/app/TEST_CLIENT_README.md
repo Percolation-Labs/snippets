@@ -188,3 +188,49 @@ This is a simplified test client for demonstration purposes. In a production env
 - Responsive design
 - CSRF protection
 - Integration with real payment providers
+
+## Troubleshooting
+
+### "Subscription tier not found" error
+
+If you encounter a "Subscription tier not found" or "Subscription tier is not properly initialized in Stripe" error when trying to subscribe to a plan:
+
+1. **Cause**: Subscription tiers are defined in the code but need to be initialized in Stripe before they can be used. This creates the necessary Stripe products and price IDs.
+
+2. **Solution**: Run the product initialization script:
+   ```bash
+   python scripts/initialize_products.py
+   ```
+   
+   This will:
+   - Create all subscription tiers in Stripe
+   - Generate and store the necessary Stripe price IDs
+   - Make the subscription tiers available for purchase
+
+3. **Verification**: After running the script, visit the products page to confirm that subscription tiers are properly displayed with "Subscribe" buttons.
+
+### Other payment integration issues
+
+If you encounter other payment-related issues:
+
+1. **Check Stripe API keys**: Ensure your Stripe API keys are properly set in environment variables.
+   ```bash
+   export STRIPE_SECRET_KEY="your_stripe_secret_key"
+   export STRIPE_PUBLISHABLE_KEY="your_stripe_publishable_key"
+   ```
+
+2. **Check Stripe webhook secret** (if using webhooks):
+   ```bash
+   export STRIPE_WEBHOOK_SECRET="your_stripe_webhook_secret"
+   ```
+
+3. **Reset test products** (if products are in a bad state):
+   ```bash
+   python scripts/reset_stripe_products.py
+   ```
+
+4. **Test mode**: If you're having trouble with Stripe integration, you can enable test mode by setting:
+   ```bash
+   export STRIPE_SECRET_KEY="sk_test_12345"
+   ```
+   This will use mock payments instead of real Stripe API calls.

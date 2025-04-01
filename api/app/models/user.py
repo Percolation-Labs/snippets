@@ -19,7 +19,7 @@ class UserProfile(UserBase):
     user_id: str
     session_id: str
     auth_method: str
-    session_expiry: datetime
+    session_expiry: datetime | str
     mfa_enabled: bool = False
     
     

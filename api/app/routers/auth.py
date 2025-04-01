@@ -3,9 +3,10 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Response, Cookie
 from fastapi.responses import RedirectResponse, JSONResponse
 from pydantic import BaseModel, EmailStr
-
+import traceback
 from app.controllers import auth_controller
 from app.models.user import UserCreate, UserProfile, MFAVerify, MFASetup
+import json
 
 router = APIRouter()
 
@@ -14,7 +15,6 @@ class LoginCredentials(BaseModel):
     email: EmailStr
     password: str
 
-
 class RegisterCredentials(BaseModel):
     email: EmailStr
     name: Optional[str] = None
@@ -22,9 +22,9 @@ class RegisterCredentials(BaseModel):
 
 
 # Auth endpoints
-@router.post("/register", response_model=UserProfile)
-async def register(credentials: RegisterCredentials):
-    """Register a new user with email and password"""
+@router.post("/register")
+async def register(credentials: RegisterCredentials, redirect_url: Optional[str] = None):
+    """Register a new user with email and password with optional redirect"""
     user_data = UserCreate(
         email=credentials.email,
         name=credentials.name,
@@ -33,13 +33,45 @@ async def register(credentials: RegisterCredentials):
     
     user = auth_controller.register_user(user_data)
     session_id = auth_controller.create_session(user.id)
+    user_profile = auth_controller.get_user_profile(user.id, session_id, "password")
     
-    return auth_controller.get_user_profile(user.id, session_id, "password")
+    # If a redirect URL was provided, send the user there
+    if redirect_url:
+        # If the URL contains a special placeholder for profile data, replace it
+        if "profile_data" in redirect_url:
+            import urllib.parse
+            user_json = urllib.parse.quote(json.dumps(user_profile.model_dump()))
+            redirect_url = redirect_url.replace("profile_data", user_json)
+        
+        # Create response with redirect
+        response = RedirectResponse(url=redirect_url, status_code=status.HTTP_303_SEE_OTHER)
+        
+        # Set cookie if it's not a data transfer redirect
+        if "profile_data" not in redirect_url:
+            response.set_cookie(
+                key="session_id",
+                value=session_id,
+                httponly=True,
+                max_age=3600 * 24,
+                samesite="lax"
+            )
+    else:
+        # No redirect - return user profile as JSON
+        response = JSONResponse(content=user_profile.model_dump())
+        response.set_cookie(
+            key="session_id",
+            value=session_id,
+            httponly=True,
+            max_age=3600 * 24,
+            samesite="lax"
+        )
+    
+    return response
 
 
-@router.post("/login", response_model=UserProfile)
-async def login(credentials: LoginCredentials):
-    """Login with email and password"""
+@router.post("/login")
+async def login(credentials: LoginCredentials, redirect_url: Optional[str] = None):
+    """Login with email and password with optional redirect"""
     user = auth_controller.authenticate_user(credentials.email, credentials.password)
     
     if not user:
@@ -49,13 +81,45 @@ async def login(credentials: LoginCredentials):
         )
     
     session_id = auth_controller.create_session(user.id)
+    user_profile = auth_controller.get_user_profile(user.id, session_id, "password")
     
-    return auth_controller.get_user_profile(user.id, session_id, "password")
+    # If a redirect URL was provided, send the user there
+    if redirect_url:
+        # If the URL contains a special placeholder for profile data, replace it
+        if "profile_data" in redirect_url:
+            import urllib.parse
+            user_json = urllib.parse.quote(json.dumps(user_profile.model_dump()))
+            redirect_url = redirect_url.replace("profile_data", user_json)
+        
+        # Create response with redirect
+        response = RedirectResponse(url=redirect_url, status_code=status.HTTP_303_SEE_OTHER)
+        
+        # Set cookie if it's not a data transfer redirect
+        if "profile_data" not in redirect_url:
+            response.set_cookie(
+                key="session_id",
+                value=session_id,
+                httponly=True,
+                max_age=3600 * 24,
+                samesite="lax"
+            )
+    else:
+        # No redirect - return user profile as JSON
+        response = JSONResponse(content=user_profile.model_dump())
+        response.set_cookie(
+            key="session_id",
+            value=session_id,
+            httponly=True,
+            max_age=3600 * 24,
+            samesite="lax"
+        )
+    
+    return response
 
 
 @router.get("/google/login")
-async def google_login():
-    """Initiate Google OAuth flow"""
+async def google_login(redirect_url: Optional[str] = None):
+    """Initiate Google OAuth flow with optional redirect URL"""
     google_client_id = os.getenv("GOOGLE_CLIENT_ID")
     redirect_uri = os.getenv("GOOGLE_REDIRECT_URI", "http://localhost:8000/auth/google/callback")
     
@@ -68,13 +132,21 @@ async def google_login():
     scope = "email profile"
     google_auth_url = f"https://accounts.google.com/o/oauth2/v2/auth?response_type=code&client_id={google_client_id}&redirect_uri={redirect_uri}&scope={scope}"
     
+    # Add state parameter with redirect URL if provided
+    if redirect_url:
+        import base64
+        encoded_redirect = base64.urlsafe_b64encode(redirect_url.encode()).decode()
+        google_auth_url += f"&state={encoded_redirect}"
+    
     return RedirectResponse(url=google_auth_url)
 
 
 @router.get("/google/callback")
-async def google_callback(code: str, request: Request):
-    """Handle Google OAuth callback"""
+async def google_callback(code: str, state: Optional[str] = None, request: Request = None):
+    """Handle Google OAuth callback with redirect support"""
     try:
+        print('HANDLING CALLBACK')
+        
         user_info, access_token = await auth_controller.exchange_google_code(code)
         
         # Check if user exists, if not register
@@ -102,19 +174,52 @@ async def google_callback(code: str, request: Request):
         session_id = auth_controller.create_session(user.id)
         user_profile = auth_controller.get_user_profile(user.id, session_id, "google")
         
-        # In a real application, you might set cookies and redirect to a frontend
-        response = JSONResponse(content=user_profile.dict())
-        response.set_cookie(
-            key="session_id",
-            value=session_id,
-            httponly=True,
-            max_age=3600 * 24,
-            samesite="lax"
-        )
+        # Check if there's a redirect URL in the state parameter
+        redirect_url = None
+        if state:
+            try:
+                import base64
+                decoded_redirect = base64.urlsafe_b64decode(state.encode()).decode()
+                if decoded_redirect:
+                    redirect_url = decoded_redirect
+            except Exception as e:
+                print(f"Error decoding redirect URL: {str(e)}")
+        
+        # If a redirect URL was provided, send the user there
+        if redirect_url:
+            # If the URL contains a special placeholder for profile data, replace it
+            if "profile_data" in redirect_url:
+                import urllib.parse
+                user_json = urllib.parse.quote(json.dumps(user_profile.model_dump()))
+                redirect_url = redirect_url.replace("profile_data", user_json)
+            
+            # Create response with redirect
+            response = RedirectResponse(url=redirect_url)
+            
+            # Set cookie if it's a same-site redirect (optional)
+            if redirect_url.startswith(str(request.base_url)[:str(request.base_url).rfind(":")]):
+                response.set_cookie(
+                    key="session_id",
+                    value=session_id,
+                    httponly=True,
+                    max_age=3600 * 24,
+                    samesite="lax"
+                )
+        else:
+            # No redirect - return user profile as JSON
+            response = JSONResponse(content=user_profile.model_dump())
+            response.set_cookie(
+                key="session_id",
+                value=session_id,
+                httponly=True,
+                max_age=3600 * 24,
+                samesite="lax"
+            )
         
         return response
         
     except Exception as e:
+        print(traceback.format_exc())
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Failed to authenticate with Google: {str(e)}"

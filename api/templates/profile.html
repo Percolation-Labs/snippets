@@ -21,6 +21,20 @@
         input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
         button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
         button:hover { background: #45a049; }
+        .system-info { 
+            margin-top: 30px; 
+            padding-top: 20px; 
+            border-top: 1px solid #eee; 
+            font-size: 0.85em; 
+            color: #666; 
+        }
+        .stripe-info {
+            margin-top: 30px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 4px;
+            border-left: 4px solid #17a2b8;
+        }
     </style>
 </head>
 <body>
@@ -40,21 +54,65 @@
             <h2>User Information</h2>
             <div class="profile-info">
                 <div><strong>Email:</strong> {{ user.email }}</div>
-                <div><strong>Display Name:</strong> {{ user.display_name or 'Not set' }}</div>
-                <div><strong>User ID:</strong> {{ user.id }}</div>
-                <div><strong>Created At:</strong> {{ user.created_at }}</div>
-                <div><strong>Subscription Tier:</strong> {{ user.subscription_tier or 'None' }}</div>
+                <div><strong>Display Name:</strong> {{ user.display_name or user.name or 'Not set' }}</div>
+                <div><strong>Subscription Tier:</strong> {{ user.subscription_tier or 'Free' }}</div>
                 <div><strong>Credits:</strong> {{ user.credits or 0 }}</div>
+            </div>
+            
+            <div class="stripe-info">
+                <h3>Payment Information</h3>
+                <div class="profile-info">
+                    <div><strong>Stripe Customer:</strong> {{ user.stripe_customer_id or 'Not set' }}</div>
+                    <div><strong>Payment Status:</strong> {{ 'Active' if user.stripe_customer_id else 'No payment method' }}</div>
+                    
+                    {% if payment_methods and payment_methods|length > 0 %}
+                        <div style="margin-top: 15px;">
+                            <strong>Payment Methods:</strong>
+                            <div style="margin-top: 10px;">
+                                {% for method in payment_methods %}
+                                    <div style="border: 1px solid #e1e4e8; border-radius: 4px; padding: 10px; margin-bottom: 10px;">
+                                        <div style="display: flex; justify-content: space-between;">
+                                            <div style="font-weight: bold;">{{ method.brand|upper }} •••• {{ method.last4 }}</div>
+                                            <div>Expires {{ method.exp_month }}/{{ method.exp_year }}</div>
+                                        </div>
+                                        {% if method.is_default %}
+                                            <div style="margin-top: 5px; font-size: 0.8em; color: #28a745;">Default payment method</div>
+                                        {% endif %}
+                                    </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    {% endif %}
+                </div>
+                <div style="margin-top: 10px;">
+                    <a href="/payments/add-card" class="button" style="text-decoration: none; padding: 8px 12px; background: #17a2b8; color: white; border-radius: 4px;">
+                        {% if payment_methods and payment_methods|length > 0 %}
+                            Add Another Payment Method
+                        {% else %}
+                            {{ 'Update Payment Method' if user.stripe_customer_id else 'Add Payment Method' }}
+                        {% endif %}
+                    </a>
+                </div>
             </div>
             
             <h2>Update Profile</h2>
             <form method="post" action="/profile/update">
                 <div class="form-group">
                     <label for="display_name">Display Name:</label>
-                    <input type="text" id="display_name" name="display_name" value="{{ user.display_name or '' }}" required>
+                    <input type="text" id="display_name" name="display_name" value="{{ user.display_name or user.name or '' }}" required>
                 </div>
                 <button type="submit">Update Profile</button>
             </form>
+            
+            <div class="system-info">
+                <h3>System Information</h3>
+                <div class="profile-info">
+                    <div><strong>User ID:</strong> {{ user.user_id or user.id }}</div>
+                    <div><strong>Created At:</strong> {{ user.created_at }}</div>
+                    <div><strong>Session ID:</strong> {{ user.session_id }}</div>
+                    <div><strong>Auth Method:</strong> {{ user.auth_method or 'Password' }}</div>
+                </div>
+            </div>
         </div>
     </div>
 </body>

@@ -1,9 +1,9 @@
 """
-Test client for API authentication and payment flows.
+Test client for API authentication and payment flows using FastHTML.
 This client runs on port 7999 and provides a simple UI to test various flows:
 - Login with email and password (simplified with mock user)
 - Login with Google (real flow)
-- Update profile from Google profile
+- Update profile from Google profile  
 - Enable/manage 2FA (real implementation)
 - Buy tokens (real Stripe integration)
 - Subscribe to plans (real Stripe integration)
@@ -14,29 +14,39 @@ import os
 import json
 import uvicorn
 from datetime import datetime
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Union
 from fastapi import FastAPI, Request, Form, Depends, HTTPException, status, Cookie
 from fastapi.responses import HTMLResponse, RedirectResponse
-from fastapi.templating import Jinja2Templates
-from fastapi.staticfiles import StaticFiles
 from fastapi.security import OAuth2PasswordRequestForm
 import httpx
 import stripe
+import urllib.parse
+import base64
+import hashlib
+import uuid
 
-# Initialize FastAPI app
-app = FastAPI(title="API Test Client")
+# Import FastHTML components
+from fasthtml.common import (
+    Div, H1, H2, H3, P, Strong, Span, A, 
+    Form, Input, Button, Label, Ul, Li,
+    Table, Tr, Th, Td, Script, Img, respond
+)
 
-# Create templates directory if it doesn't exist
-os.makedirs("templates", exist_ok=True)
+# Import components
+from app.components.fasthtml_layout import fasthtml_layout, STYLES
+from app.components.payments import payments_page as payments_component
+from app.components.products import products_page as products_component
 
-# Set up templates
-templates = Jinja2Templates(directory="templates")
+# Initialize FastHTML
+from fasthtml.common import FastHTML
+app = FastHTML()
+
+# Add session middleware for secure session management
+from starlette.middleware.sessions import SessionMiddleware
+app.add_middleware(SessionMiddleware, secret_key="your-secret-key-for-test-only")
 
 # Define API base URL (our actual API we're testing)
 API_BASE_URL = "http://localhost:8000"  # Assuming the API runs on port 8000
-
-# Store session data (in production, use a proper session store)
-SESSION_STORE = {}
 
 # Stripe configuration (using public key for client-side)
 STRIPE_PUBLISHABLE_KEY = os.getenv("STRIPE_PUBLISHABLE_KEY", "pk_test_example")
@@ -49,79 +59,546 @@ async def make_api_request(
     data: Optional[Dict[str, Any]] = None, 
     token: Optional[str] = None
 ) -> Dict[str, Any]:
-    """Make a request to the API"""
+    """Make a request to the API
+    
+    This function handles API authentication by:
+    1. Passing the session_id as a cookie if available (preferred)
+    2. Using a Bearer token if cookies are not supported
+    
+    The API relies on the session_id cookie for authentication, not the Authorization header.
+    """
     url = f"{API_BASE_URL}{endpoint}"
     headers = {}
+    cookies = {}
     
+    # Add session_id as cookie for authentication
     if token:
+        cookies["session_id"] = token
+        
+        # Legacy: Include Authorization header as fallback
+        # The API should primarily use the session_id cookie
         headers["Authorization"] = f"Bearer {token}"
+    
+    # Debug the request
+    print(f"Making {method.upper()} request to {url}")
+    print(f"Cookies: {cookies}")
     
     async with httpx.AsyncClient() as client:
         if method.lower() == "get":
-            response = await client.get(url, headers=headers)
+            response = await client.get(url, headers=headers, cookies=cookies)
         elif method.lower() == "post":
-            response = await client.post(url, json=data, headers=headers)
+            response = await client.post(url, json=data, headers=headers, cookies=cookies)
         elif method.lower() == "put":
-            response = await client.put(url, json=data, headers=headers)
+            response = await client.put(url, json=data, headers=headers, cookies=cookies)
         else:
             raise ValueError(f"Unsupported method: {method}")
         
-        if response.status_code >= 400:
-            return {"error": response.text, "status_code": response.status_code}
+        # Debug the response
+        print(f"Response status: {response.status_code}")
         
-        return response.json()
+        if response.status_code >= 400:
+            error_detail = response.text
+            try:
+                error_json = response.json()
+                if "detail" in error_json:
+                    error_detail = error_json["detail"]
+            except:
+                pass
+            
+            print(f"API error: {error_detail}")
+            return {"error": error_detail, "status_code": response.status_code}
+        
+        try:
+            return response.json()
+        except Exception as e:
+            print(f"Error parsing API response as JSON: {str(e)}")
+            return {"error": "Invalid JSON response", "data": response.text}
 
 
-# Dependency to get current session data
-async def get_current_session(session_id: Optional[str] = Cookie(None)):
-    """Get the current session data"""
-    if not session_id or session_id not in SESSION_STORE:
-        return None
-    return SESSION_STORE[session_id]
+# We no longer need a custom session dependency as FastHTML's middleware provides session access via request.session
+
+
+# FastHTML Components
+
+def Section(content, class_name="section"):
+    """Create a section with the specified content"""
+    return Div(content, class_=class_name)
+
+
+def LoginForm():
+    """Create login form component"""
+    return Form(
+        Div(
+            Label("Email:", for_="username"),
+            Input(type="email", id="username", name="username", required=True),
+            class_="form-group"
+        ),
+        Div(
+            Label("Password:", for_="password"),
+            Input(type="password", id="password", name="password", required=True),
+            class_="form-group"
+        ),
+        Button("Login", type="submit"),
+        method="post",
+        action="/login"
+    )
+
+
+def SocialLogin():
+    """Create social login options"""
+    return Div(
+        Div(
+            Span("OR"),
+            class_="divider"
+        ),
+        A(
+            "Login with Google",
+            href="/google-login",
+            class_="social-button"
+        ),
+        class_="social-login-section"
+    )
+
+
+def ProfileInfo(user: Dict[str, Any], payment_methods: List[Dict[str, Any]] = None):
+    """Create user profile information component"""
+    if payment_methods is None:
+        payment_methods = []
+        
+   
+    
+    # User information
+    user_info = Div(
+        *[Div(Strong("Email:"), f" {user.get('email')}"),
+        Div(Strong("Display Name:"), f" {user.get('display_name') or user.get('name') or 'Not set'}"),
+        Div(Strong("Subscription Tier:"), f" {user.get('subscription_tier', 'Free')}"),
+        Div(Strong("Credits:"), f" {user.get('credits', 0)}")],
+        class_="profile-info"
+    )
+    
+    print(user_info)
+    
+    # Payment information section
+    payment_info =[
+        H3("Payment Information"),
+        Div(
+            Div(Strong("Stripe Customer:"), f" {user.get('stripe_customer_id', 'Not set')}"),
+            Div(
+                Strong("Payment Status:"),
+                " ",
+                Span("Active", class_="badge badge-success") if user.get('stripe_customer_id') else 
+                Span("No payment method", class_="badge badge-warning")
+            ),
+            class_="profile-info"
+        )
+    ]
+    
+    # Payment methods display if available
+    if payment_methods and len(payment_methods) > 0:
+        method_cards = []
+        for method in payment_methods:
+            method_card = Div(
+                Div(
+                    Div(f"{method.get('brand', '').upper()} •••• {method.get('last4', '')}", 
+                        class_="card-brand"),
+                    Div(f"Expires {method.get('exp_month', '')}/{method.get('exp_year', '')}"),
+                    class_="card-header"
+                ),
+                Div(
+                    Span("Default payment method", class_="badge badge-success") 
+                    if method.get('is_default') else "",
+                    style="margin-top: 5px; font-size: 0.8em;"
+                ),
+                class_="card",
+                style="border: 1px solid #e1e4e8; border-radius: 4px; padding: 10px; margin-bottom: 10px;"
+            )
+            method_cards.append(method_card)
+            
+        payment_info.append(
+            Div(
+                Div(Strong("Payment Methods:"), style="margin-bottom: 10px;"),
+                *method_cards,
+                style="margin-top: 15px;"
+            )
+        )
+    
+    # Add a button to add or update payment method
+    payment_info.append(
+        Div(
+            A(
+                "Add Another Payment Method" if payment_methods and len(payment_methods) > 0 
+                else f"{'Update' if user.get('stripe_customer_id') else 'Add'} Payment Method",
+                href="/payments/add-card",
+                class_="button",
+                style="text-decoration: none;"
+            ),
+            style="margin-top: 10px;"
+        )
+    )
+    
+    # Profile update form
+    update_form = Form(
+        Div(
+            Label("Display Name:", for_="display_name"),
+            Input(
+                type="text", 
+                id="display_name", 
+                name="display_name", 
+                value=user.get('display_name') or user.get('name') or '',
+                required=True
+            ),
+            class_="form-group"
+        ),
+        Button("Update Profile", type="submit"),
+        method="post",
+        action="/profile/update"
+    )
+    
+    # System information
+    system_info = Div(
+        H3("System Information"),
+        Div(
+            Div(Strong("User ID:"), f" {user.get('user_id') or user.get('id')}"),
+            Div(Strong("Created At:"), f" {user.get('created_at')}"),
+            Div(Strong("Session ID:"), f" {user.get('session_id')}"),
+            Div(Strong("Auth Method:"), f" {user.get('auth_method', 'Password')}"),
+            class_="profile-info"
+        ),
+        class_="system-info",
+        style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #eee; font-size: 0.85em; color: #666;"
+    )
+    
+    
+    
+    return [
+       Section(
+           *[ H2("User Information"),
+            user_info]
+        ),
+        Div(
+            *payment_info,
+            class_="stripe-info",
+            style="margin-top: 30px; padding: 15px; background-color: #f8f9fa; border-radius: 4px; border-left: 4px solid #17a2b8;"
+        ),
+        Section(
+          *[  H2("Update Profile"),
+            update_form]
+        ),
+        system_info
+    ]
+
+
+def TwoFAStatus(twofa_status: Dict[str, Any]):
+    """Create 2FA status component"""
+    is_enabled = twofa_status.get("enabled", False)
+    
+    if is_enabled:
+        status_div = Div(
+            P(Strong("2FA is enabled"), " for your account."),
+            P("Your account is protected with two-factor authentication using an authenticator app."),
+            class_="status enabled",
+            style="background-color: #e8f5e9; border: 1px solid #a5d6a7; margin-bottom: 20px; padding: 15px; border-radius: 4px;"
+        )
+        
+        action_form = Form(
+            Button(
+                "Disable 2FA", 
+                type="submit", 
+                class_="danger",
+                style="background: #f44336; color: white; border: none; border-radius: 4px; padding: 8px 12px; cursor: pointer;"
+            ),
+            method="post",
+            action="/2fa/disable"
+        )
+    else:
+        status_div = Div(
+            P(Strong("2FA is not enabled"), " for your account."),
+            P("Enable two-factor authentication to add an extra layer of security to your account."),
+            class_="status disabled",
+            style="background-color: #ffebee; border: 1px solid #ffcdd2; margin-bottom: 20px; padding: 15px; border-radius: 4px;"
+        )
+        
+        action_form = Form(
+            Button(
+                "Enable 2FA", 
+                type="submit",
+                style="background: #4CAF50; color: white; border: none; border-radius: 4px; padding: 8px 12px; cursor: pointer;"
+            ),
+            method="post",
+            action="/2fa/enable"
+        )
+    
+    return str(Section(
+        H2("2FA Status"),
+        status_div,
+        action_form
+    ))
+
+
+def TwoFASetup(twofa_setup: Dict[str, Any]):
+    """Create 2FA setup component with QR code"""
+    return  Section(
+        H2("Setup Instructions"),
+        Div(
+            Div(
+                H3("1. Scan QR Code"),
+                P("Use an authenticator app like Google Authenticator, Authy, or Microsoft Authenticator to scan the QR code below."),
+                class_="step"
+            ),
+            Div(
+                Div(
+                    Img(src=twofa_setup.get("qr_code", "")),
+                    class_="qr-code",
+                    style="display: inline-block; padding: 10px; background: white; border: 1px solid #ddd;"
+                ),
+                class_="qr-container",
+                style="text-align: center; margin: 20px 0;"
+            ),
+            Div(
+                H3("2. Manual Setup"),
+                P("If you can't scan the QR code, you can manually enter this secret key in your authenticator app:"),
+                Div(
+                    twofa_setup.get("secret", ""),
+                    class_="secret-key",
+                    style="margin: 20px 0; padding: 10px; background: #f5f5f5; border-radius: 4px; font-family: monospace; text-align: center;"
+                ),
+                class_="step"
+            ),
+            Div(
+                H3("3. Verify Setup"),
+                P("Enter the 6-digit code from your authenticator app to verify the setup:"),
+                Form(
+                    Div(
+                        Label("Authentication Code:", for_="code"),
+                        Input(type="text", id="code", name="code", placeholder="000000", required=True),
+                        class_="form-group"
+                    ),
+                    Button("Verify", type="submit"),
+                    method="post",
+                    action="/2fa/verify"
+                ),
+                class_="step"
+            ),
+            class_="steps"
+        )
+    ) 
+
+
+def CardSetupPage(setup_intent: Dict[str, Any], stripe_pk: str):
+    """Create credit card setup page with Stripe Elements"""
+    # Create JS for Stripe integration
+    stripe_js = f"""
+        // Initialize Stripe
+        const stripe = Stripe('{stripe_pk}');
+        const elements = stripe.elements();
+        
+        // Create card element
+        const cardElement = elements.create('card');
+        cardElement.mount('#card-element');
+        
+        // Handle form submission
+        const form = document.getElementById('payment-form');
+        const submitButton = document.getElementById('submit-button');
+        const errorElement = document.getElementById('card-errors');
+        
+        form.addEventListener('submit', async (event) => {{
+            event.preventDefault();
+            
+            // Disable submit button
+            submitButton.disabled = true;
+            submitButton.textContent = 'Processing...';
+            
+            // Create payment method
+            const {{ setupIntent, error }} = await stripe.confirmCardSetup(
+                '{setup_intent["client_secret"]}',
+                {{
+                    payment_method: {{
+                        card: cardElement,
+                    }}
+                }}
+            );
+            
+            if (error) {{
+                // Show error to customer
+                errorElement.textContent = error.message;
+                submitButton.disabled = false;
+                submitButton.textContent = 'Add Card';
+            }} else {{
+                // Submit payment method ID to server
+                const form = document.createElement('form');
+                form.method = 'POST';
+                form.action = '/payments/add-card';
+                
+                const input = document.createElement('input');
+                input.type = 'hidden';
+                input.name = 'payment_method_id';
+                input.value = setupIntent.payment_method;
+                
+                form.appendChild(input);
+                document.body.appendChild(form);
+                form.submit();
+            }}
+        }});
+    """
+    
+    return [
+        Section(
+            H2("Add Credit or Debit Card"),
+            Form(
+                Div(
+                    Label("Credit or debit card", for_="card-element"),
+                    Div(id="card-element"),
+                    Div(id="card-errors", role="alert", class_="error-message", style="color: #fa755a; margin-top: 10px;"),
+                    class_="form-row",
+                    style="margin-bottom: 20px;"
+                ),
+                Button("Add Card", id="submit-button", type="submit"),
+                id="payment-form",
+                style="max-width: 500px;"
+            )
+        ),
+        # Stripe JavaScript library
+        Script(src="https://js.stripe.com/v3/"),
+        # Stripe initialization and card handling JS in a div
+        Div(
+            Script(stripe_js)
+        )
+    ]
+    
+
+def HomePage(user: Optional[Dict[str, Any]] = None):
+    """Create home page content"""
+    if user:
+        return  Div(
+            *[H2(f"Welcome, {user.get('display_name') or user.get('email')}"),
+            P("You are logged in. Use the navigation above to test different features.")]
+        ) 
+    else:
+        return  Div(
+           *[ H2("Welcome to the API Test Client"),
+            P("This client allows you to test various API flows:"),
+            Ul(
+                Li("Login with email and password"),
+                Li("Login with Google"),
+                Li("Update user profile"),
+                Li("Enable/manage 2FA"),
+                Li("Add payment methods"),
+                Li("Buy tokens"),
+                Li("Subscribe to plans")
+            ),
+            P(A("Login", href="/login"), " to get started.")]
+        ) 
+
+
+def LoginPage():
+    """Create login page content"""
+    return [
+         Section(
+            H2("Email Login"),
+            LoginForm()
+        ),
+         SocialLogin() 
+    ]
 
 
 # Routes
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request, session: Optional[Dict] = Depends(get_current_session)):
+# app = FastHTML()
+
+# @app.get("/")
+# def home():
+#     return "<h1>Hello, World</h1>"
+
+@app.get("/" )
+def home(session):
     """Home page with links to all test flows"""
-    return templates.TemplateResponse(
-        "index.html",
-        {"request": request, "user": session.get("user") if session else None}
-    )
+    try:
+        
+        user = session.get("user") if session else None
+        nav_items = [
+            {"text": "Home", "href": "/"},
+        ]
+        
+        if user:
+            nav_items.extend([
+                {"text": "Profile", "href": "/profile"},
+                {"text": "2FA", "href": "/2fa"},
+                {"text": "Payments", "href": "/payments"},
+                {"text": "Products", "href": "/products"},
+                {"text": "Logout", "href": "/logout"}
+            ])
+        else:
+            nav_items.append({"text": "Login", "href": "/login"})
+        
+        content = HomePage(user)
+        html = fasthtml_layout("Home", content, nav_items)
+    
+        return html
+    except Exception as ex:
+        import traceback
+        print(traceback.format_exc())
+        Div(traceback.format_exc())
 
-
-@app.get("/login", response_class=HTMLResponse)
+@app.get("/login")
 async def login_page(request: Request):
     """Login page with email/password form and Google login option"""
-    return templates.TemplateResponse("login.html", {"request": request})
+    nav_items = [
+        {"text": "Home", "href": "/"}
+    ]
+    
+    content = Div(*LoginPage())
+    html = fasthtml_layout("Login", content, nav_items)
+    return html
 
 
 @app.post("/login")
-async def login(form_data: OAuth2PasswordRequestForm = Depends()):
-    """Handle email/password login with a mock user
-    
-    This keeps login simple by using a mock user,
-    but the token is structured to match what the API expects
-    """
-    # Create mock token that looks like a JWT
-    mock_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzEyMzQiLCJleHAiOjk5OTk5OTk5OTl9.mock_signature"
-    
-    # Get real user data from API, or create mock user if API is unavailable
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), session=None):
+    """Handle email/password login by forwarding to the API"""
     try:
-        # Attempt to get user data with the mock token
-        user_data = await make_api_request(
-            "get", 
-            "/users/me", 
-            token=mock_token
-        )
+        # Create a callback URL with profile_data placeholder to receive user profile
+        callback_url = f"http://localhost:7999/profile-callback?data=profile_data"
         
-        # If the API returns an error, revert to using a mock user
-        if "error" in user_data:
-            raise Exception("Failed to get user data")
+        # Forward login request to API with redirect URL
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            api_response = await client.post(
+                f"{API_BASE_URL}/auth/login",
+                json={
+                    "email": form_data.username,
+                    "password": form_data.password
+                },
+                params={"redirect_url": callback_url}
+            )
             
-    except Exception:
+            # Check response type
+            if 300 <= api_response.status_code < 400:
+                # API is handling the redirect - just pass it through
+                return RedirectResponse(
+                    url=api_response.headers["location"], 
+                    status_code=status.HTTP_302_FOUND
+                )
+            elif api_response.status_code == 200:
+                # API returned profile data directly
+                user_data = api_response.json()
+                session_id = api_response.cookies.get('session_id', os.urandom(16).hex())
+                
+                # Save in FastHTML session
+                session["token"] = session_id
+                session["user"] = user_data
+                
+                # Redirect to profile page
+                return RedirectResponse(url="/profile", status_code=status.HTTP_302_FOUND)
+            
+            # Something went wrong with the API call
+            raise Exception(f"API returned status {api_response.status_code}: {api_response.text}")
+    
+    except Exception as e:
         # If API call fails, create a mock user
+        print(f"Error during login: {str(e)}")
+        
+        # Create mock token
+        mock_token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiJ1c2VyXzEyMzQiLCJleHAiOjk5OTk5OTk5OTl9.mock_signature"
+        
+        # Create mock user data
         user_data = {
             "id": "user_1234",
             "email": form_data.username,
@@ -132,62 +609,68 @@ async def login(form_data: OAuth2PasswordRequestForm = Depends()):
             "is_active": True,
             "is_verified": True
         }
-    
-    # Create session
-    session_id = os.urandom(16).hex()
-    SESSION_STORE[session_id] = {
-        "token": mock_token,
-        "user": user_data
-    }
-    
-    # Redirect to home with session cookie
-    response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
-    response.set_cookie(key="session_id", value=session_id)
-    return response
+        
+        # Store in FastHTML session
+        session["token"] = mock_token
+        session["user"] = user_data
+        
+        # Redirect to home
+        return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
 
 
 @app.get("/google-login")
 async def google_login():
     """Initiate Google login flow"""
-    # Redirect to the real API's Google auth endpoint
-    return RedirectResponse(url=f"{API_BASE_URL}/auth/google/login")
+    # Create a callback URL that includes placeholder for profile data
+    callback_url = f"http://localhost:7999/profile-callback?data=profile_data"
+    
+    # URL encode the callback URL to use as a state parameter
+    import urllib.parse
+    import base64
+    # Encode the URL in base64 for state parameter
+    encoded_redirect = base64.urlsafe_b64encode(callback_url.encode()).decode()
+    
+    # Redirect to the API's Google login endpoint with the redirect URL in state
+    return RedirectResponse(url=f"{API_BASE_URL}/auth/google/login?redirect_url={urllib.parse.quote(callback_url)}")
 
 
 @app.get("/google-callback")
-async def google_callback(code: str, state: str):
+async def google_callback(code: str, state: Optional[str] = None, session=None):
     """Handle Google login callback"""
-    # Exchange code for token with the real API
+    # The API now handles the redirect directly, so we just forward the request
+    # We just need to extract the session cookie from the response and use it
     try:
-        response = await make_api_request(
-            "post",
-            "/auth/google/callback",
-            {"code": code, "state": state}
-        )
-        
-        if "error" in response:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Google authentication failed"
+        # Our Google callback endpoint should now be handled by the API directly
+        # Make a GET request to the API's Google callback endpoint
+        async with httpx.AsyncClient(follow_redirects=False) as client:
+            api_response = await client.get(
+                f"{API_BASE_URL}/auth/google/callback?code={code}"
             )
-        
-        # Get user data
-        user_data = await make_api_request(
-            "get", 
-            "/users/me", 
-            token=response["access_token"]
-        )
-        
-        # Create session
-        session_id = os.urandom(16).hex()
-        SESSION_STORE[session_id] = {
-            "token": response["access_token"],
-            "user": user_data
-        }
-        
-        # Redirect to home with session cookie
-        response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
-        response.set_cookie(key="session_id", value=session_id)
-        return response
+            
+            # If the API responded with a redirect and set a session cookie
+            if 300 <= api_response.status_code < 400 and 'session_id' in api_response.cookies:
+                # Extract session_id from the API response
+                session_id = api_response.cookies.get('session_id')
+                
+                # Get user data from API using the session cookie
+                async with httpx.AsyncClient() as client2:
+                    user_response = await client2.get(
+                        f"{API_BASE_URL}/auth/me",
+                        cookies={"session_id": session_id}
+                    )
+                    
+                    if user_response.status_code == 200:
+                        user_data = user_response.json()
+                        
+                        # Save in our FastHTML session
+                        session["token"] = session_id
+                        session["user"] = user_data
+                
+                # Redirect to profile
+                return RedirectResponse(url="/profile", status_code=status.HTTP_302_FOUND)
+            else:
+                # Something went wrong with the API call
+                raise Exception(f"API returned status {api_response.status_code}: {api_response.text}")
         
     except Exception as e:
         # If the real API call fails, log the error and create a mock session
@@ -208,38 +691,127 @@ async def google_callback(code: str, state: str):
             "is_verified": True
         }
         
-        # Create session with mock data
-        session_id = os.urandom(16).hex()
-        SESSION_STORE[session_id] = {
-            "token": mock_token,
-            "user": mock_user
-        }
+        # Store in FastHTML session
+        session["token"] = mock_token
+        session["user"] = mock_user
         
-        # Redirect to home with session cookie
-        response = RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
-        response.set_cookie(key="session_id", value=session_id)
-        return response
+        # Redirect to home
+        return RedirectResponse(url="/", status_code=status.HTTP_302_FOUND)
 
 
-@app.get("/profile", response_class=HTMLResponse)
-async def profile_page(
-    request: Request, 
-    session: Optional[Dict] = Depends(get_current_session)
+@app.get("/profile-callback")
+async def profile_callback(data: Optional[str] = None, session=None):
+    """Handle profile data relayed from API after login"""
+    if not data:
+        # If no profile data was provided, redirect to login
+        return RedirectResponse(url="/login")
+    
+    try:
+        # Decode the JSON profile data
+        import json
+        import urllib.parse
+        
+        decoded_profile = urllib.parse.unquote(data)
+        user_data = json.loads(decoded_profile)
+        
+        # Store in FastHTML session
+        session["token"] = user_data.get("session_id", "")
+        session["user"] = user_data
+        
+        # Redirect to profile page
+        return RedirectResponse(url="/profile", status_code=status.HTTP_302_FOUND)
+        
+    except Exception as e:
+        # If decoding fails, log error and redirect to login
+        print(f"Error processing profile data: {str(e)}")
+        return RedirectResponse(url="/login")
+
+
+@app.get("/profile")
+async def profile_page( 
+    session
 ):
     """User profile page"""
     if not session:
+        print('session is empty - redirecting...')
         return RedirectResponse(url="/login")
     
-    return templates.TemplateResponse(
-        "profile.html",
-        {"request": request, "user": session.get("user")}
-    )
+    # Ensure user has a UUID - generate one based on email for idempotency
+    user = session.get("user", {})
+    session_id = session.get("token", "")
+    
+    if not user.get("user_id"):
+        # Use email to create a stable UUID
+        email = user.get("email", "")
+        if email:
+            # Create a hash from the email
+            hash_obj = hashlib.md5(email.encode())
+            # Format the hash as a UUID-like string
+            uuid_from_hash = f"{hash_obj.hexdigest()[:8]}-{hash_obj.hexdigest()[8:12]}-{hash_obj.hexdigest()[12:16]}-{hash_obj.hexdigest()[16:20]}-{hash_obj.hexdigest()[20:32]}"
+            user["user_id"] = uuid_from_hash
+        else:
+            # Fallback to random UUID if no email
+            user["user_id"] = str(uuid.uuid4())
+            
+        session["user"] = user
+    
+    # Check if the user has a Stripe customer ID, if not try to retrieve it
+    if not user.get("stripe_customer_id") and user.get("email"):
+        try:
+            # Try to get customer ID from the API by email
+            customer_info = await make_api_request(
+                "get",
+                "/payments/customer-by-email",
+                data={"email": user["email"]},
+                token=session_id
+            )
+            
+            if not "error" in customer_info and customer_info.get("customer_id"):
+                user["stripe_customer_id"] = customer_info["customer_id"]
+                session["user"] = user
+                print(f"Retrieved and set Stripe customer ID: {customer_info['customer_id']}")
+        except Exception as e:
+            print(f"Error retrieving Stripe customer: {str(e)}")
+    
+    # If user has a customer ID, try to get payment methods
+    payment_methods = []
+    if user.get("stripe_customer_id"):
+        try:
+            # Get payment methods from API
+            payment_response = await make_api_request(
+                "get",
+                "/payments/methods",
+                token=session_id
+            )
+        
+            print('Payment methods')
+                
+            if not "error" in payment_response and isinstance(payment_response, list):
+                payment_methods = payment_response
+                print(f"Retrieved {len(payment_methods)} payment methods")
+        
+        except Exception as e:
+            print(f"Error retrieving payment methods: {str(e)}")
+    
+    nav_items = [
+        {"text": "Home", "href": "/"},
+        {"text": "2FA", "href": "/2fa"},
+        {"text": "Payments", "href": "/payments"},
+        {"text": "Products", "href": "/products"},
+        {"text": "Logout", "href": "/logout"}
+    ]
+    
+    content_blocks = ProfileInfo(user, payment_methods)
+    content = Div(*content_blocks)
+    html = fasthtml_layout("Profile", content, nav_items)
+    
+    return html
 
 
 @app.post("/profile/update")
 async def update_profile(
-    display_name: str = Form(...),
-    session: Optional[Dict] = Depends(get_current_session)
+    session,
+    display_name: str = Form(...)
 ):
     """Update user profile"""
     if not session:
@@ -269,11 +841,8 @@ async def update_profile(
     return RedirectResponse(url="/profile", status_code=status.HTTP_302_FOUND)
 
 
-@app.get("/2fa", response_class=HTMLResponse)
-async def twofa_page(
-    request: Request, 
-    session: Optional[Dict] = Depends(get_current_session)
-):
+@app.get("/2fa")
+async def twofa_page(session=None):
     """2FA setup and management page"""
     if not session:
         return RedirectResponse(url="/login")
@@ -294,18 +863,21 @@ async def twofa_page(
         print(f"Error getting 2FA status: {str(e)}")
         twofa_status = {"enabled": False}
     
-    return templates.TemplateResponse(
-        "2fa.html",
-        {
-            "request": request, 
-            "user": session.get("user"),
-            "twofa_status": twofa_status
-        }
-    )
-
+    nav_items = [
+        {"text": "Home", "href": "/"},
+        {"text": "Profile", "href": "/profile"},
+        {"text": "Payments", "href": "/payments"},
+        {"text": "Products", "href": "/products"},
+        {"text": "Logout", "href": "/logout"}
+    ]
+    
+    content = TwoFAStatus(twofa_status)
+    html = fasthtml_layout("Two-Factor Authentication", content, nav_items)
+    
+    return html
 
 @app.post("/2fa/enable")
-async def enable_2fa(session: Optional[Dict] = Depends(get_current_session)):
+async def enable_2fa(session):
     """Enable 2FA for user"""
     if not session:
         return RedirectResponse(url="/login")
@@ -339,29 +911,29 @@ async def enable_2fa(session: Optional[Dict] = Depends(get_current_session)):
     return RedirectResponse(url="/2fa/setup", status_code=status.HTTP_302_FOUND)
 
 
-@app.get("/2fa/setup", response_class=HTMLResponse)
+@app.get("/2fa/setup")
 async def twofa_setup_page(
-    request: Request, 
-    session: Optional[Dict] = Depends(get_current_session)
+    session
 ):
     """2FA setup page with QR code"""
     if not session or "twofa_setup" not in session:
         return RedirectResponse(url="/2fa")
     
-    return templates.TemplateResponse(
-        "2fa_setup.html",
-        {
-            "request": request, 
-            "user": session.get("user"),
-            "twofa_setup": session["twofa_setup"]
-        }
-    )
-
+    nav_items = [
+        {"text": "Home", "href": "/"},
+        {"text": "Profile", "href": "/profile"},
+        {"text": "Back to 2FA", "href": "/2fa"}
+    ]
+    
+    content = TwoFASetup(session["twofa_setup"])
+    html = fasthtml_layout("Setup Two-Factor Authentication", content, nav_items)
+    
+    return html
 
 @app.post("/2fa/verify")
 async def verify_2fa(
-    code: str = Form(...),
-    session: Optional[Dict] = Depends(get_current_session)
+    session,
+    code: str = Form(...)
 ):
     """Verify 2FA setup with code"""
     if not session or "twofa_setup" not in session:
@@ -396,7 +968,7 @@ async def verify_2fa(
 
 
 @app.post("/2fa/disable")
-async def disable_2fa(session: Optional[Dict] = Depends(get_current_session)):
+async def disable_2fa(session):
     """Disable 2FA for user"""
     if not session:
         return RedirectResponse(url="/login")
@@ -419,97 +991,137 @@ async def disable_2fa(session: Optional[Dict] = Depends(get_current_session)):
     return RedirectResponse(url="/2fa", status_code=status.HTTP_302_FOUND)
 
 
-@app.get("/payments", response_class=HTMLResponse)
+@app.get("/payments")
 async def payments_page(
-    request: Request, 
-    session: Optional[Dict] = Depends(get_current_session)
+    session
 ):
-    """Payment management page"""
+    """Payment management page
+    
+    This page displays a user's payment information including:
+    1. Saved payment methods (credit cards)
+    2. Active subscriptions
+    3. Payment history
+    
+    If the user doesn't have a Stripe customer ID yet, we show an option to add a payment method.
+    If they already have payment methods, they can manage them from this page.
+    """
     if not session:
         return RedirectResponse(url="/login")
+    
+    # Get current user data and session ID
+    user = session.get("user", {})
+    session_id = session.get("token", "")
+    
+    print(f"Payment page - User data: {user}")
+    print(f"Payment page - Session ID: {session_id}")
     
     # Initialize data containers
     payment_methods = []
     subscriptions = []
     payments = []
     
-    # Get user's payment methods from API
-    try:
-        payment_methods = await make_api_request(
-            "get",
-            "/payments/methods",
-            token=session["token"]
-        )
-        
-        if "error" in payment_methods:
-            raise Exception(payment_methods.get("error", "Failed to get payment methods"))
+    # Only fetch payment data if the user has a Stripe customer ID
+    if user.get("stripe_customer_id"):
+        # Get user's payment methods from API
+        try:
+            payment_methods = await make_api_request(
+                "get",
+                "/payments/methods",
+                token=session_id
+            )
             
-    except Exception as e:
-        print(f"Error fetching payment methods: {str(e)}")
-        # Keep empty list for payment methods
-    
-    # Get user's subscriptions from API
-    try:
-        subscriptions = await make_api_request(
-            "get",
-            "/payments/subscriptions",
-            token=session["token"]
-        )
+            if "error" in payment_methods:
+                raise Exception(payment_methods.get("error", "Failed to get payment methods"))
+                
+        except Exception as e:
+            print(f"Error fetching payment methods: {str(e)}")
+            # Keep empty list for payment methods
         
-        if "error" in subscriptions:
-            raise Exception(subscriptions.get("error", "Failed to get subscriptions"))
+        # Get user's subscriptions from API
+        try:
+            subscriptions = await make_api_request(
+                "get",
+                "/payments/my/subscriptions",
+                token=session_id
+            )
             
-    except Exception as e:
-        print(f"Error fetching subscriptions: {str(e)}")
-        # Keep empty list for subscriptions
-    
-    # Get payment history from API
-    try:
-        payments = await make_api_request(
-            "get",
-            "/payments/history",
-            token=session["token"]
-        )
+            if "error" in subscriptions:
+                raise Exception(subscriptions.get("error", "Failed to get subscriptions"))
+                
+        except Exception as e:
+            print(f"Error fetching subscriptions: {str(e)}")
+            # Keep empty list for subscriptions
         
-        if "error" in payments:
-            raise Exception(payments.get("error", "Failed to get payment history"))
+        # Get payment history from API
+        try:
+            payments = await make_api_request(
+                "get",
+                "/payments/my/payments",
+                token=session_id
+            )
             
-    except Exception as e:
-        print(f"Error fetching payment history: {str(e)}")
-        # Keep empty list for payments
+            if "error" in payments:
+                raise Exception(payments.get("error", "Failed to get payment history"))
+                
+        except Exception as e:
+            print(f"Error fetching payment history: {str(e)}")
+            # Keep empty list for payments
     
-    return templates.TemplateResponse(
-        "payments.html",
-        {
-            "request": request, 
-            "user": session.get("user"),
-            "payment_methods": payment_methods,
-            "subscriptions": subscriptions,
-            "payments": payments,
-            "stripe_pk": STRIPE_PUBLISHABLE_KEY
-        }
+    # Use the FastHTML component
+    html_content = payments_component(
+        user=user,
+        payment_methods=payment_methods,
+        subscriptions=subscriptions,
+        payments=payments,
+        has_payment_method=len(payment_methods) > 0 or user.get("stripe_customer_id")
     )
+    
+    return html_content
 
 
-@app.get("/payments/add-card", response_class=HTMLResponse)
+@app.get("/payments/add-card")
 async def add_card_page(
-    request: Request, 
-    session: Optional[Dict] = Depends(get_current_session)
+    session
 ):
-    """Add payment method page"""
+    """Add payment method page
+    
+    This page allows users to add a new payment method (credit card) to their account.
+    
+    Flow:
+    1. When the page loads, we request a SetupIntent from the API
+    2. The API will create a Stripe customer if one doesn't exist yet
+    3. The SetupIntent allows secure collection of payment details
+    4. The page displays Stripe Elements for secure card input
+    5. After submission, the card is attached to the customer
+    """
     if not session:
         return RedirectResponse(url="/login")
     
     try:
-        # Get setup intent from API
+        # Ensure the user has a Stripe customer ID before proceeding
+        # The API will create one if needed during the setup-intent request
+        user = session.get("user", {})
+        session_id = session.get("token", "")
+        
+        print(f"Current user data: {user}")
+        print(f"Session ID: {session_id}")
+        
+        # Get setup intent from API - this will also create a Stripe customer if needed
         setup_intent = await make_api_request(
             "post",
             "/payments/setup-intent",
-            token=session["token"]
+            data={},  # Make sure we're sending an empty object rather than None
+            token=session_id
         )
         
         if "error" in setup_intent:
             raise Exception(setup_intent.get("error", "Failed to create setup intent"))
+        
+        # If we got a customer ID back, update the session
+        if setup_intent.get("customer_id") and not user.get("stripe_customer_id"):
+            user["stripe_customer_id"] = setup_intent["customer_id"]
+            session["user"] = user
+            print(f"Updated user with customer ID: {setup_intent['customer_id']}")
             
     except Exception as e:
         print(f"Error creating setup intent: {str(e)}")
@@ -518,33 +1130,52 @@ async def add_card_page(
             "client_secret": "seti_mock_secret_" + os.urandom(8).hex()
         }
     
-    return templates.TemplateResponse(
-        "add_card.html",
-        {
-            "request": request, 
-            "user": session.get("user"),
-            "setup_intent": setup_intent,
-            "stripe_pk": STRIPE_PUBLISHABLE_KEY
-        }
-    )
+    nav_items = [
+        {"text": "Home", "href": "/"},
+        {"text": "Back to Payments", "href": "/payments"}
+    ]
+    
+    content = Div(*CardSetupPage(setup_intent, STRIPE_PUBLISHABLE_KEY))
+    html = fasthtml_layout("Add Payment Method", content, nav_items)
+    
+    return html
 
 
 @app.post("/payments/add-card")
 async def add_card(
-    payment_method_id: str = Form(...),
-    session: Optional[Dict] = Depends(get_current_session)
+    session,
+    payment_method_id: str = Form(...)
 ):
-    """Add payment method to user account"""
+    """Add payment method to user account
+    
+    This function handles the form submission after a user enters their card details.
+    The form sends the Stripe PaymentMethod ID (created client-side) which is then:
+    
+    1. Sent to our API to be attached to the customer
+    2. The API saves this as the default payment method for the customer
+    3. The customer ID is returned and saved in the user's session
+    
+    After successful addition, we update the user's profile with the Stripe customer ID
+    to show that they have a payment method set up.
+    """
     if not session:
         return RedirectResponse(url="/login")
     
     try:
+        # Get session ID from token
+        session_id = session.get("token", "")
+        user = session.get("user", {})
+        
+        print(f"Adding payment method {payment_method_id}")
+        print(f"Session ID: {session_id}")
+        print(f"Current user data: {user}")
+        
         # Add payment method through API
         response = await make_api_request(
             "post",
             "/payments/methods",
             {"payment_method_id": payment_method_id},
-            token=session["token"]
+            token=session_id
         )
         
         if "error" in response:
@@ -553,35 +1184,69 @@ async def add_card(
                 detail=response.get("error", "Failed to add payment method")
             )
         
+        print(f"API response for adding payment method: {response}")
+        
+        # If the API returned a customer ID, update the user's profile
+        if response.get("customer_id"):
+            user["stripe_customer_id"] = response["customer_id"]
+            session["user"] = user
+            print(f"Updated user with customer ID: {response['customer_id']}")
+            
+            # Optionally, you can update the user's profile on the API side too
+            # But this isn't necessary since the API already knows about the customer_id
+        
     except HTTPException as he:
         # Re-raise HTTP exceptions
+        print(f"HTTP Exception: {str(he)}")
         raise he
     except Exception as e:
         print(f"Error adding payment method: {str(e)}")
     
+    # Redirect to payments page to show the newly added card
     return RedirectResponse(url="/payments", status_code=status.HTTP_302_FOUND)
 
 
-@app.get("/products", response_class=HTMLResponse)
+@app.get("/products")
 async def products_page(
-    request: Request, 
-    session: Optional[Dict] = Depends(get_current_session)
+   
+    session 
 ):
     """Products and subscription plans page"""
     if not session:
         return RedirectResponse(url="/login")
     
+    # Get session ID for API requests
+    session_id = session.get("token", "")
+    user = session.get("user", {})
+    
     # Initialize data containers
     products = []
     tiers = []
+    
+    # First, ensure products are initialized in the API
+    try:
+        # Call the initialize-products endpoint to ensure all products exist
+        init_response = await make_api_request(
+            "post",
+            "/payments/initialize-products",
+            data={},
+            token=session_id
+        )
+        
+        print(f"Products initialization response: {init_response}")
+    except Exception as e:
+        print(f"Error initializing products: {str(e)}")
+        # Continue anyway, we'll try to get the products
     
     # Get available products from API
     try:
         products = await make_api_request(
             "get",
             "/payments/products",
-            token=session["token"]
+            token=session_id
         )
+        
+        print(f"Products response: {products}")
         
         if "error" in products:
             raise Exception(products.get("error", "Failed to get products"))
@@ -604,8 +1269,10 @@ async def products_page(
         tiers = await make_api_request(
             "get",
             "/payments/subscription-tiers",
-            token=session["token"]
+            token=session_id
         )
+        
+        print(f"Subscription tiers response: {tiers}")
         
         if "error" in tiers:
             raise Exception(tiers.get("error", "Failed to get subscription tiers"))
@@ -644,43 +1311,113 @@ async def products_page(
             }
         ]
     
-    return templates.TemplateResponse(
-        "products.html",
-        {
-            "request": request, 
-            "user": session.get("user"),
-            "products": products,
-            "tiers": tiers
-        }
+    # Check if user has a Stripe customer ID, if not try to get one
+    if not user.get("stripe_customer_id"):
+        # Try to get a customer ID by email
+        try:
+            if user.get("email"):
+                customer_response = await make_api_request(
+                    "get",
+                    f"/payments/customer-by-email?email={user['email']}",
+                    token=session_id
+                )
+                
+                if "found" in customer_response and customer_response["found"] and customer_response.get("customer_id"):
+                    user["stripe_customer_id"] = customer_response["customer_id"]
+                    session["user"] = user
+                    print(f"Retrieved customer ID by email: {customer_response['customer_id']}")
+        except Exception as e:
+            print(f"Error retrieving customer by email: {str(e)}")
+            # Continue anyway, user can still browse products
+    
+    # Calculate if there are any paid tiers
+    has_paid_tiers = any(tier.get("price", 0) > 0 for tier in tiers)
+    
+    # Use the FastHTML component
+    html_content = products_component(
+        user=user,
+        products=products,
+        tiers=tiers,
+        has_customer=bool(user.get("stripe_customer_id")),
+        has_paid_tiers=has_paid_tiers
     )
+    
+    return html_content
 
 
 @app.post("/products/buy-tokens")
 async def buy_tokens(
-    token_amount: int = Form(...),
-    session: Optional[Dict] = Depends(get_current_session)
+    session ,
+    token_amount: int = Form(...)
+
 ):
-    """Buy tokens"""
+    """Buy tokens
+    
+    This function creates a checkout session for purchasing tokens through the API.
+    It ensures the user has a Stripe customer ID and sends the success/cancel URLs.
+    """
     if not session:
         return RedirectResponse(url="/login")
     
     try:
-        # Create checkout session for tokens through API
+        # Get session ID and user data
+        session_id = session.get("token", "")
+        user = session.get("user", {})
+        
+        # Check if user has a Stripe customer ID, if not try to get one
+        if not user.get("stripe_customer_id"):
+            # Try to get a customer ID by creating a setup intent
+            try:
+                setup_response = await make_api_request(
+                    "post",
+                    "/payments/setup-intent",
+                    data={},
+                    token=session_id
+                )
+                
+                if not "error" in setup_response and setup_response.get("customer_id"):
+                    user["stripe_customer_id"] = setup_response["customer_id"]
+                    session["user"] = user
+                    print(f"Retrieved customer ID for token purchase: {setup_response['customer_id']}")
+            except Exception as e:
+                print(f"Error retrieving customer ID: {str(e)}")
+                # Continue anyway, the API will handle it
+        
+        # Get the base URL for success/cancel URLs
+        base_url = str(API_BASE_URL)
+        success_url = f"{base_url}/payments/success?session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = f"{base_url}/payments"
+        
+        # Create checkout session for tokens
+        print(f"Creating token purchase for {token_amount} tokens")
         response = await make_api_request(
             "post",
-            "/payments/checkout/tokens",
-            {"amount": token_amount},
-            token=session["token"]
+            "/payments/buy-tokens",
+            {
+                "amount": token_amount,
+                "success_url": success_url,
+                "cancel_url": cancel_url
+            },
+            token=session_id
         )
         
+        # Debug the response
+        print(f"Token purchase response: {response}")
+        
         if "error" in response:
+            error_message = response.get("error", "Failed to create checkout session")
+            print(f"Token purchase error: {error_message}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=response.get("error", "Failed to create checkout session")
+                detail=error_message
             )
         
         # Redirect to Stripe checkout
-        return RedirectResponse(url=response["url"], status_code=status.HTTP_302_FOUND)
+        checkout_url = response.get("url")
+        if not checkout_url:
+            raise Exception("No checkout URL returned from API")
+            
+        return RedirectResponse(url=checkout_url, status_code=status.HTTP_302_FOUND)
         
     except HTTPException as he:
         # Re-raise HTTP exceptions
@@ -701,30 +1438,77 @@ async def buy_tokens(
 
 @app.post("/products/subscribe")
 async def subscribe(
-    tier_id: str = Form(...),
-    session: Optional[Dict] = Depends(get_current_session)
+    session,
+    tier_id: str = Form(...)
+    
 ):
-    """Subscribe to a plan"""
+    """Subscribe to a plan
+    
+    This function creates a subscription checkout session through the API.
+    It ensures the user has a Stripe customer ID and sends the success/cancel URLs.
+    """
     if not session:
         return RedirectResponse(url="/login")
     
     try:
-        # Create subscription checkout session through API
+        # Get session ID and user data
+        session_id = session.get("token", "")
+        user = session.get("user", {})
+        
+        # Check if user has a Stripe customer ID, if not try to get one
+        if not user.get("stripe_customer_id"):
+            # Try to get a customer ID by creating a setup intent
+            try:
+                setup_response = await make_api_request(
+                    "post",
+                    "/payments/setup-intent",
+                    data={},
+                    token=session_id
+                )
+                
+                if not "error" in setup_response and setup_response.get("customer_id"):
+                    user["stripe_customer_id"] = setup_response["customer_id"]
+                    session["user"] = user
+                    print(f"Retrieved customer ID for subscription: {setup_response['customer_id']}")
+            except Exception as e:
+                print(f"Error retrieving customer ID: {str(e)}")
+                # Continue anyway, the API will handle it
+        
+        # Get the base URL for success/cancel URLs
+        base_url = str(API_BASE_URL)
+        success_url = f"{base_url}/payments/success?session_id={{CHECKOUT_SESSION_ID}}"
+        cancel_url = f"{base_url}/payments"
+        
+        # Create subscription checkout session
+        print(f"Creating subscription for tier: {tier_id}")
         response = await make_api_request(
             "post",
-            "/payments/checkout/subscription",
-            {"tier_id": tier_id},
-            token=session["token"]
+            "/payments/subscribe",
+            {
+                "tier": tier_id,
+                "success_url": success_url,
+                "cancel_url": cancel_url
+            },
+            token=session_id
         )
         
+        # Debug the response
+        print(f"Subscription response: {response}")
+        
         if "error" in response:
+            error_message = response.get("error", "Failed to create subscription")
+            print(f"Subscription error: {error_message}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=response.get("error", "Failed to create subscription")
+                detail=error_message
             )
         
         # Redirect to Stripe checkout
-        return RedirectResponse(url=response["url"], status_code=status.HTTP_302_FOUND)
+        checkout_url = response.get("url")
+        if not checkout_url:
+            raise Exception("No checkout URL returned from API")
+            
+        return RedirectResponse(url=checkout_url, status_code=status.HTTP_302_FOUND)
         
     except HTTPException as he:
         # Re-raise HTTP exceptions
@@ -759,10 +1543,59 @@ async def subscribe(
         )
 
 
+@app.post("/payments/cancel-subscription")
+async def cancel_subscription(
+    session,
+    subscription_id: str = Form(...),
+    cancel_immediately: str = Form(...)
+):
+    """Cancel a subscription
+    
+    This endpoint calls the API to cancel a subscription, either immediately
+    or at the end of the billing period.
+    """
+    if not session:
+        return RedirectResponse(url="/login")
+    
+    try:
+        # Convert string "true"/"false" to boolean
+        cancel_now = cancel_immediately.lower() == "true"
+        
+        # Call API to cancel subscription
+        response = await make_api_request(
+            "post",
+            f"/payments/subscriptions/{subscription_id}/cancel",
+            {"cancel_immediately": cancel_now},
+            token=session["token"]
+        )
+        
+        if "error" in response:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=response.get("error", "Failed to cancel subscription")
+            )
+        
+        # If we're in test mode or the API call fails, update the session data manually
+        if cancel_now:
+            # Simulate immediate cancellation by removing the subscription from the user data
+            user = session.get("user", {})
+            user["subscription_tier"] = "Free"
+            session["user"] = user
+        
+    except HTTPException as he:
+        # Re-raise HTTP exceptions
+        raise he
+    except Exception as e:
+        print(f"Error canceling subscription: {str(e)}")
+    
+    # Redirect back to the payments page
+    return RedirectResponse(url="/payments", status_code=status.HTTP_302_FOUND)
+
+
 @app.get("/payments/success")
 async def payment_success(
     session_id: str,
-    session: Optional[Dict] = Depends(get_current_session)
+    session = None
 ):
     """Handle successful payment from Stripe checkout"""
     if not session:
@@ -800,696 +1633,15 @@ async def logout():
     return response
 
 
-# Create templates
-
-# Index page
-index_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2 { margin-top: 0; }
-        ul { padding-left: 20px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>API Test Client</h1>
-            <div class="nav">
-                {% if user %}
-                    <a href="/profile">Profile</a>
-                    <a href="/2fa">2FA</a>
-                    <a href="/payments">Payments</a>
-                    <a href="/products">Products</a>
-                    <a href="/logout">Logout</a>
-                {% else %}
-                    <a href="/login">Login</a>
-                {% endif %}
-            </div>
-        </div>
-        
-        {% if user %}
-            <div class="section">
-                <h2>Welcome, {{ user.display_name or user.email }}</h2>
-                <p>You are logged in. Use the navigation above to test different features.</p>
-            </div>
-        {% else %}
-            <div class="section">
-                <h2>Welcome to the API Test Client</h2>
-                <p>This client allows you to test various API flows:</p>
-                <ul>
-                    <li>Login with email and password</li>
-                    <li>Login with Google</li>
-                    <li>Update user profile</li>
-                    <li>Enable/manage 2FA</li>
-                    <li>Add payment methods</li>
-                    <li>Buy tokens</li>
-                    <li>Subscribe to plans</li>
-                </ul>
-                <p>Please <a href="/login">login</a> to get started.</p>
-            </div>
-        {% endif %}
-    </div>
-</body>
-</html>"""
-
-# Login page
-login_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Login - API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2 { margin-top: 0; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; }
-        input[type="text"], input[type="password"], input[type="email"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #45a049; }
-        .divider { margin: 20px 0; text-align: center; position: relative; }
-        .divider:before { content: ""; display: block; width: 100%; height: 1px; background: #ddd; position: absolute; top: 50%; }
-        .divider span { background: white; padding: 0 10px; position: relative; }
-        .social-button { display: block; width: 100%; padding: 10px; margin-bottom: 10px; text-align: center; background: #4285F4; color: white; text-decoration: none; border-radius: 4px; }
-        .social-button:hover { background: #3367D6; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Login</h1>
-            <div class="nav">
-                <a href="/">Home</a>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Email Login</h2>
-            <form method="post" action="/login">
-                <div class="form-group">
-                    <label for="username">Email:</label>
-                    <input type="email" id="username" name="username" required>
-                </div>
-                <div class="form-group">
-                    <label for="password">Password:</label>
-                    <input type="password" id="password" name="password" required>
-                </div>
-                <button type="submit">Login</button>
-            </form>
-            
-            <div class="divider">
-                <span>OR</span>
-            </div>
-            
-            <a href="/google-login" class="social-button">Login with Google</a>
-        </div>
-    </div>
-</body>
-</html>"""
-
-# Profile page
-profile_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Profile - API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2 { margin-top: 0; }
-        .profile-info { margin-bottom: 20px; }
-        .profile-info div { margin-bottom: 10px; }
-        .profile-info strong { display: inline-block; width: 150px; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; }
-        input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #45a049; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Profile</h1>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/2fa">2FA</a>
-                <a href="/payments">Payments</a>
-                <a href="/products">Products</a>
-                <a href="/logout">Logout</a>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>User Information</h2>
-            <div class="profile-info">
-                <div><strong>Email:</strong> {{ user.email }}</div>
-                <div><strong>Display Name:</strong> {{ user.display_name or 'Not set' }}</div>
-                <div><strong>User ID:</strong> {{ user.id }}</div>
-                <div><strong>Created At:</strong> {{ user.created_at }}</div>
-                <div><strong>Subscription Tier:</strong> {{ user.subscription_tier or 'None' }}</div>
-                <div><strong>Credits:</strong> {{ user.credits or 0 }}</div>
-            </div>
-            
-            <h2>Update Profile</h2>
-            <form method="post" action="/profile/update">
-                <div class="form-group">
-                    <label for="display_name">Display Name:</label>
-                    <input type="text" id="display_name" name="display_name" value="{{ user.display_name or '' }}" required>
-                </div>
-                <button type="submit">Update Profile</button>
-            </form>
-        </div>
-    </div>
-</body>
-</html>"""
-
-# 2FA page
-twofa_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Two-Factor Authentication - API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2 { margin-top: 0; }
-        .status { margin-bottom: 20px; padding: 15px; border-radius: 4px; }
-        .status.enabled { background-color: #e8f5e9; border: 1px solid #a5d6a7; }
-        .status.disabled { background-color: #ffebee; border: 1px solid #ffcdd2; }
-        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #45a049; }
-        button.danger { background: #f44336; }
-        button.danger:hover { background: #e53935; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Two-Factor Authentication</h1>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/profile">Profile</a>
-                <a href="/payments">Payments</a>
-                <a href="/products">Products</a>
-                <a href="/logout">Logout</a>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>2FA Status</h2>
-            {% if twofa_status.enabled %}
-                <div class="status enabled">
-                    <p><strong>2FA is enabled</strong> for your account.</p>
-                    <p>Your account is protected with two-factor authentication using an authenticator app.</p>
-                </div>
-                <form method="post" action="/2fa/disable">
-                    <button type="submit" class="danger">Disable 2FA</button>
-                </form>
-            {% else %}
-                <div class="status disabled">
-                    <p><strong>2FA is not enabled</strong> for your account.</p>
-                    <p>Enable two-factor authentication to add an extra layer of security to your account.</p>
-                </div>
-                <form method="post" action="/2fa/enable">
-                    <button type="submit">Enable 2FA</button>
-                </form>
-            {% endif %}
-        </div>
-    </div>
-</body>
-</html>"""
-
-# 2FA setup page
-twofa_setup_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Setup Two-Factor Authentication - API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2, h3 { margin-top: 0; }
-        .steps { margin-bottom: 20px; }
-        .step { margin-bottom: 15px; }
-        .qr-container { text-align: center; margin: 20px 0; }
-        .qr-code { display: inline-block; padding: 10px; background: white; border: 1px solid #ddd; }
-        .secret-key { margin: 20px 0; padding: 10px; background: #f5f5f5; border-radius: 4px; font-family: monospace; text-align: center; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; }
-        input[type="text"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #45a049; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Setup Two-Factor Authentication</h1>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/profile">Profile</a>
-                <a href="/2fa">Back to 2FA</a>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Setup Instructions</h2>
-            <div class="steps">
-                <div class="step">
-                    <h3>1. Scan QR Code</h3>
-                    <p>Use an authenticator app like Google Authenticator, Authy, or Microsoft Authenticator to scan the QR code below.</p>
-                </div>
-                
-                <div class="qr-container">
-                    <div class="qr-code">
-                        <img src="{{ twofa_setup.qr_code }}" alt="QR Code for 2FA">
-                    </div>
-                </div>
-                
-                <div class="step">
-                    <h3>2. Manual Setup</h3>
-                    <p>If you can't scan the QR code, you can manually enter this secret key in your authenticator app:</p>
-                    <div class="secret-key">{{ twofa_setup.secret }}</div>
-                </div>
-                
-                <div class="step">
-                    <h3>3. Verify Setup</h3>
-                    <p>Enter the 6-digit code from your authenticator app to verify the setup:</p>
-                    <form method="post" action="/2fa/verify">
-                        <div class="form-group">
-                            <label for="code">Authentication Code:</label>
-                            <input type="text" id="code" name="code" placeholder="000000" required>
-                        </div>
-                        <button type="submit">Verify</button>
-                    </form>
-                </div>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"""
-
-# Payments page
-payments_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Payments - API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2, h3 { margin-top: 0; }
-        .card { border: 1px solid #ddd; border-radius: 4px; padding: 15px; margin-bottom: 15px; }
-        .card-header { display: flex; justify-content: space-between; margin-bottom: 10px; }
-        .card-brand { font-weight: bold; }
-        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-        th, td { padding: 8px; text-align: left; border-bottom: 1px solid #ddd; }
-        th { background-color: #f5f5f5; }
-        .button { display: inline-block; padding: 8px 12px; background: #4CAF50; color: white; text-decoration: none; border: none; border-radius: 4px; cursor: pointer; }
-        .button:hover { background: #45a049; }
-        .empty-state { padding: 20px; text-align: center; background: #f5f5f5; border-radius: 4px; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Payments</h1>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/profile">Profile</a>
-                <a href="/2fa">2FA</a>
-                <a href="/products">Products</a>
-                <a href="/logout">Logout</a>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Payment Methods</h2>
-            {% if payment_methods and payment_methods|length > 0 %}
-                {% for method in payment_methods %}
-                    <div class="card">
-                        <div class="card-header">
-                            <div class="card-brand">{{ method.brand|upper }} •••• {{ method.last4 }}</div>
-                            <div>Expires {{ method.exp_month }}/{{ method.exp_year }}</div>
-                        </div>
-                        <div>
-                            {% if method.is_default %}
-                                <span>Default</span>
-                            {% endif %}
-                        </div>
-                    </div>
-                {% endfor %}
-            {% else %}
-                <div class="empty-state">
-                    <p>You don't have any payment methods yet.</p>
-                </div>
-            {% endif %}
-            <a href="/payments/add-card" class="button">Add Payment Method</a>
-        </div>
-        
-        <div class="section">
-            <h2>Active Subscriptions</h2>
-            {% if subscriptions and subscriptions|length > 0 %}
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Plan</th>
-                            <th>Status</th>
-                            <th>Started</th>
-                            <th>Renewal Date</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for sub in subscriptions %}
-                            <tr>
-                                <td>{{ sub.product_name }}</td>
-                                <td>{{ sub.status }}</td>
-                                <td>{{ sub.current_period_start }}</td>
-                                <td>{{ sub.current_period_end }}</td>
-                            </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            {% else %}
-                <div class="empty-state">
-                    <p>You don't have any active subscriptions.</p>
-                </div>
-            {% endif %}
-            <a href="/products" class="button">View Subscription Plans</a>
-        </div>
-        
-        <div class="section">
-            <h2>Payment History</h2>
-            {% if payments and payments|length > 0 %}
-                <table>
-                    <thead>
-                        <tr>
-                            <th>Date</th>
-                            <th>Amount</th>
-                            <th>Description</th>
-                            <th>Status</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for payment in payments %}
-                            <tr>
-                                <td>{{ payment.created_at }}</td>
-                                <td>{{ payment.amount }} {{ payment.currency|upper }}</td>
-                                <td>{{ payment.description or payment.payment_method }}</td>
-                                <td>{{ payment.status }}</td>
-                            </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            {% else %}
-                <div class="empty-state">
-                    <p>You don't have any payment history yet.</p>
-                </div>
-            {% endif %}
-        </div>
-    </div>
-</body>
-</html>"""
-
-# Add card page
-add_card_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Add Payment Method - API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <script src="https://js.stripe.com/v3/"></script>
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2 { margin-top: 0; }
-        #payment-form { max-width: 500px; }
-        .form-row { margin-bottom: 20px; }
-        label { display: block; margin-bottom: 5px; }
-        .StripeElement { background-color: white; padding: 10px 12px; border-radius: 4px; border: 1px solid #ddd; }
-        .StripeElement--focus { border-color: #80bdff; }
-        .StripeElement--invalid { border-color: #fa755a; }
-        .error-message { color: #fa755a; margin-top: 10px; }
-        button { padding: 8px 12px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer; }
-        button:hover { background: #45a049; }
-        button:disabled { background: #9E9E9E; cursor: not-allowed; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Add Payment Method</h1>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/payments">Back to Payments</a>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Add Credit or Debit Card</h2>
-            <form id="payment-form">
-                <div class="form-row">
-                    <label for="card-element">Credit or debit card</label>
-                    <div id="card-element"></div>
-                    <div id="card-errors" class="error-message" role="alert"></div>
-                </div>
-                <button id="submit-button" type="submit">Add Card</button>
-            </form>
-        </div>
-    </div>
-    
-    <script>
-        // Initialize Stripe
-        const stripe = Stripe('{{ stripe_pk }}');
-        const elements = stripe.elements();
-        
-        // Create card element
-        const cardElement = elements.create('card');
-        cardElement.mount('#card-element');
-        
-        // Handle form submission
-        const form = document.getElementById('payment-form');
-        const submitButton = document.getElementById('submit-button');
-        const errorElement = document.getElementById('card-errors');
-        
-        form.addEventListener('submit', async (event) => {
-            event.preventDefault();
-            
-            // Disable submit button
-            submitButton.disabled = true;
-            submitButton.textContent = 'Processing...';
-            
-            // Create payment method
-            const { setupIntent, error } = await stripe.confirmCardSetup(
-                '{{ setup_intent.client_secret }}',
-                {
-                    payment_method: {
-                        card: cardElement,
-                    }
-                }
-            );
-            
-            if (error) {
-                // Show error to customer
-                errorElement.textContent = error.message;
-                submitButton.disabled = false;
-                submitButton.textContent = 'Add Card';
-            } else {
-                // Submit payment method ID to server
-                const form = document.createElement('form');
-                form.method = 'POST';
-                form.action = '/payments/add-card';
-                
-                const input = document.createElement('input');
-                input.type = 'hidden';
-                input.name = 'payment_method_id';
-                input.value = setupIntent.payment_method;
-                
-                form.appendChild(input);
-                document.body.appendChild(form);
-                form.submit();
-            }
-        });
-    </script>
-</body>
-</html>"""
-
-# Products page
-products_html = """<!DOCTYPE html>
-<html>
-<head>
-    <title>Products & Subscriptions - API Test Client</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <style>
-        body { font-family: system-ui, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; }
-        .container { border: 1px solid #ddd; border-radius: 5px; padding: 20px; margin-bottom: 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; }
-        .nav { display: flex; gap: 10px; }
-        .nav a { text-decoration: none; padding: 8px 12px; background: #f0f0f0; border-radius: 4px; }
-        .nav a:hover { background: #e0e0e0; }
-        .section { margin-top: 20px; }
-        h1, h2, h3 { margin-top: 0; }
-        .plans { display: flex; gap: 20px; flex-wrap: wrap; margin-bottom: 20px; }
-        .plan { flex: 1; min-width: 200px; border: 1px solid #ddd; border-radius: 4px; padding: 20px; }
-        .plan.current { border-color: #4CAF50; border-width: 2px; }
-        .plan-header { margin-bottom: 15px; }
-        .plan-name { font-size: 1.2em; font-weight: bold; }
-        .plan-price { font-size: 1.5em; font-weight: bold; margin: 10px 0; }
-        .plan-price .period { font-size: 0.7em; color: #666; }
-        .plan-features { margin-bottom: 20px; }
-        .plan-features li { margin-bottom: 5px; }
-        .plan-action { margin-top: auto; }
-        .button { display: inline-block; padding: 8px 12px; background: #4CAF50; color: white; text-decoration: none; border: none; border-radius: 4px; cursor: pointer; width: 100%; text-align: center; box-sizing: border-box; }
-        .button:hover { background: #45a049; }
-        .button.current { background: #9E9E9E; }
-        .tokens-section { margin-top: 40px; }
-        .token-purchase { max-width: 500px; }
-        .form-group { margin-bottom: 15px; }
-        label { display: block; margin-bottom: 5px; }
-        input[type="number"] { width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; }
-        .token-price { margin-top: 5px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <div class="header">
-            <h1>Products & Subscriptions</h1>
-            <div class="nav">
-                <a href="/">Home</a>
-                <a href="/profile">Profile</a>
-                <a href="/payments">Payments</a>
-                <a href="/logout">Logout</a>
-            </div>
-        </div>
-        
-        <div class="section">
-            <h2>Subscription Plans</h2>
-            <div class="plans">
-                {% for tier in tiers %}
-                    <div class="plan {% if user.subscription_tier == tier.name %}current{% endif %}">
-                        <div class="plan-header">
-                            <div class="plan-name">{{ tier.name }}</div>
-                            <div class="plan-price">
-                                {% if tier.price == 0 %}
-                                    Free
-                                {% else %}
-                                    ${{ tier.price }}<span class="period">/month</span>
-                                {% endif %}
-                            </div>
-                        </div>
-                        <div class="plan-features">
-                            <ul>
-                                {% for feature in tier.features %}
-                                    <li>{{ feature }}</li>
-                                {% endfor %}
-                                <li><strong>{{ tier.credits }}</strong> credits per month</li>
-                            </ul>
-                        </div>
-                        <div class="plan-action">
-                            {% if user.subscription_tier == tier.name %}
-                                <button class="button current" disabled>Current Plan</button>
-                            {% elif tier.price == 0 %}
-                                <form method="post" action="/products/subscribe">
-                                    <input type="hidden" name="tier_id" value="{{ tier.name }}">
-                                    <button type="submit" class="button">Switch to Free</button>
-                                </form>
-                            {% else %}
-                                <form method="post" action="/products/subscribe">
-                                    <input type="hidden" name="tier_id" value="{{ tier.name }}">
-                                    <button type="submit" class="button">Subscribe</button>
-                                </form>
-                            {% endif %}
-                        </div>
-                    </div>
-                {% endfor %}
-            </div>
-        </div>
-        
-        <div class="section tokens-section">
-            <h2>Buy Tokens</h2>
-            <div class="token-purchase">
-                <p>Tokens are used for API calls and other premium features. Each token costs ${{ products[0].price if products else 0.01 }}.</p>
-                <form method="post" action="/products/buy-tokens">
-                    <div class="form-group">
-                        <label for="token_amount">Number of tokens to purchase:</label>
-                        <input type="number" id="token_amount" name="token_amount" value="50" min="50" required>
-                        <div class="token-price">Minimum purchase: 50 tokens</div>
-                    </div>
-                    <button type="submit" class="button">Buy Tokens</button>
-                </form>
-            </div>
-        </div>
-    </div>
-</body>
-</html>"""
-
-# Write templates to files
-os.makedirs("templates", exist_ok=True)
-with open("templates/index.html", "w") as f:
-    f.write(index_html)
-with open("templates/login.html", "w") as f:
-    f.write(login_html)
-with open("templates/profile.html", "w") as f:
-    f.write(profile_html)
-with open("templates/2fa.html", "w") as f:
-    f.write(twofa_html)
-with open("templates/2fa_setup.html", "w") as f:
-    f.write(twofa_setup_html)
-with open("templates/payments.html", "w") as f:
-    f.write(payments_html)
-with open("templates/add_card.html", "w") as f:
-    f.write(add_card_html)
-with open("templates/products.html", "w") as f:
-    f.write(products_html)
-
 # Main entry point
 if __name__ == "__main__":
-    uvicorn.run("test_client:app", host="0.0.0.0", port=7999, reload=True)
+    print("Starting FastAPI app...")
+    import logging
+    logging.basicConfig(level=logging.DEBUG)
+    
+    # Debug info
+    print("Routes registered:")
+    for route in app.routes:
+        print(f"  {route.path}")
+    
+    uvicorn.run("app.test_client:app", host="0.0.0.0", port=7999, reload=True)

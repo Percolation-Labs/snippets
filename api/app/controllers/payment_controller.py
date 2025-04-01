@@ -423,7 +423,8 @@ def create_payment_intent(amount: float, currency: str = "usd",
 
 def create_checkout_session(price_id: str, success_url: str, cancel_url: str, 
                            metadata: Optional[Dict[str, Any]] = None,
-                           customer_id: Optional[str] = None) -> Dict[str, Any]:
+                           customer_id: Optional[str] = None,
+                           quantity: int = 1) -> Dict[str, Any]:
     """Create a checkout session in Stripe for one-time payments
     
     Stripe Checkout provides a pre-built, hosted payment page optimized for
@@ -452,6 +453,7 @@ def create_checkout_session(price_id: str, success_url: str, cancel_url: str,
         cancel_url: Where to redirect if payment is canceled
         metadata: Optional dictionary of metadata to attach to the session
         customer_id: Optional Stripe customer ID to associate with the session
+        quantity: The quantity of items to purchase (default: 1)
         
     Returns:
         Dict containing the Stripe Checkout Session object
@@ -499,7 +501,7 @@ def create_checkout_session(price_id: str, success_url: str, cancel_url: str,
             "payment_method_types": ["card"],
             "line_items": [{
                 "price": price_id,
-                "quantity": 1
+                "quantity": quantity
             }],
             "mode": "payment",
             "success_url": success_url,
@@ -509,15 +511,14 @@ def create_checkout_session(price_id: str, success_url: str, cancel_url: str,
         
         # Add customer if provided
         if customer_id:
-            session_params["customer"] = customer_id
-            
-            # If the customer exists, use customer mode which will show saved payment methods
             try:
                 # Try to retrieve customer to verify it exists
                 stripe.Customer.retrieve(customer_id)
-                session_params["customer_creation"] = "never"
+                # Customer exists, use it
+                session_params["customer"] = customer_id
             except stripe.error.InvalidRequestError:
-                # If customer doesn't exist, let Stripe create a new one with the ID we provided
+                # Customer doesn't exist with this ID, set customer_creation to always
+                # (Without specifying a customer ID, Stripe will create a new one)
                 session_params["customer_creation"] = "always"
         
         # Create the checkout session
@@ -600,15 +601,14 @@ def create_subscription_checkout_session(price_id: str, success_url: str, cancel
         
         # Add customer if provided
         if customer_id:
-            session_params["customer"] = customer_id
-            
-            # If the customer exists, use customer mode which will show saved payment methods
             try:
                 # Try to retrieve customer to verify it exists
                 stripe.Customer.retrieve(customer_id)
-                session_params["customer_creation"] = "never"
+                # Customer exists, use it
+                session_params["customer"] = customer_id
             except stripe.error.InvalidRequestError:
-                # If customer doesn't exist, let Stripe create a new one with the ID we provided
+                # Customer doesn't exist with this ID, set customer_creation to always
+                # (Without specifying a customer ID, Stripe will create a new one)
                 session_params["customer_creation"] = "always"
         
         # Create the checkout session
@@ -776,6 +776,85 @@ def update_user_credits(user_id: str, credits: int) -> None:
     users_db[user_id] = user
 
 
+def verify_user_credits(user_id: str, required_credits: int) -> bool:
+    """Verify if a user has sufficient credits for an operation
+    
+    This function checks if a user has enough credits to perform an operation
+    that requires credits. It's important to call this function before allowing
+    users to access premium features or services that consume credits.
+    
+    The verification flow:
+    1. Get the user's current credit balance
+    2. Check if the balance is sufficient for the requested operation
+    3. Return True if sufficient, False if insufficient
+    
+    Args:
+        user_id: Your application's internal user identifier
+        required_credits: The number of credits required for the operation
+        
+    Returns:
+        Boolean indicating whether the user has sufficient credits
+        
+    Raises:
+        HTTPException: If the user is not found
+    """
+    from app.controllers.auth_controller import users_db
+    
+    user = users_db.get(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    return user.credits >= required_credits
+
+
+def consume_user_credits(user_id: str, credits_to_consume: int) -> int:
+    """Consume credits from a user's account
+    
+    This function deducts credits from a user's account after they use a
+    premium feature or service. It first verifies that the user has sufficient
+    credits, then deducts the specified amount.
+    
+    The consumption flow:
+    1. Verify the user has sufficient credits
+    2. Deduct the credits from the user's balance
+    3. Return the user's remaining credit balance
+    
+    Args:
+        user_id: Your application's internal user identifier
+        credits_to_consume: The number of credits to deduct
+        
+    Returns:
+        The user's remaining credit balance
+        
+    Raises:
+        HTTPException: If the user is not found or has insufficient credits
+    """
+    from app.controllers.auth_controller import users_db
+    
+    # Verify user has sufficient credits
+    if not verify_user_credits(user_id, credits_to_consume):
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Insufficient credits. Required: {credits_to_consume}"
+        )
+    
+    # Get user and deduct credits
+    user = users_db.get(user_id)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found"
+        )
+    
+    user.credits -= credits_to_consume
+    users_db[user_id] = user
+    
+    return user.credits
+
+
 def update_user_subscription_tier(user_id: str, tier: str) -> None:
     """Update a user's subscription tier after subscription creation or change
     
@@ -828,6 +907,95 @@ def get_user_payments(user_id: str) -> List[Payment]:
 def get_user_subscriptions(user_id: str) -> List[Subscription]:
     """Get all subscriptions for a user"""
     return [s for s in subscriptions_db.values() if s.user_id == user_id]
+
+
+def cancel_subscription(subscription_id: str, cancel_immediately: bool = False) -> Dict[str, Any]:
+    """Cancel a subscription in Stripe
+    
+    This function cancels a Stripe subscription. By default, the subscription
+    remains active until the end of the current billing period. If cancel_immediately
+    is True, the subscription is canceled immediately.
+    
+    The subscription cancellation flow:
+    1. Retrieve the current subscription from the local database
+    2. Cancel the subscription in Stripe
+    3. Update the local subscription record
+    4. Return the updated subscription details
+    
+    Args:
+        subscription_id: The ID of the subscription to cancel
+        cancel_immediately: Whether to cancel immediately or at period end
+        
+    Returns:
+        Dict containing the updated Stripe Subscription object
+        
+    Raises:
+        HTTPException: If the subscription is not found or there's an error
+        
+    Stripe Documentation:
+        https://stripe.com/docs/api/subscriptions/cancel
+        https://stripe.com/docs/billing/subscriptions/cancel
+    """
+    # Check if subscription exists in database
+    if subscription_id not in subscriptions_db:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Subscription not found"
+        )
+    
+    # Get subscription details
+    subscription = subscriptions_db[subscription_id]
+    stripe_subscription_id = subscription.stripe_subscription_id
+    
+    # Handle test mode or real API
+    if TEST_MODE:
+        # Update the subscription in our mock database
+        subscription.status = "canceled"
+        subscription.cancel_at_period_end = not cancel_immediately
+        subscription.canceled_at = datetime.utcnow()
+        
+        # If canceling immediately, update the period end to now
+        if cancel_immediately:
+            subscription.current_period_end = datetime.utcnow()
+        
+        # Save to mock database
+        subscriptions_db[subscription_id] = subscription
+        
+        return {
+            "id": stripe_subscription_id,
+            "status": "canceled" if cancel_immediately else "active",
+            "cancel_at_period_end": not cancel_immediately,
+            "canceled_at": int(datetime.utcnow().timestamp()),
+            "current_period_end": int(subscription.current_period_end.timestamp())
+        }
+    
+    try:
+        # Cancel the subscription in Stripe
+        stripe_subscription = stripe.Subscription.modify(
+            stripe_subscription_id,
+            cancel_at_period_end=not cancel_immediately
+        )
+        
+        if cancel_immediately:
+            # Cancel immediately
+            stripe_subscription = stripe.Subscription.delete(stripe_subscription_id)
+        
+        # Update the subscription in our database
+        subscription.status = stripe_subscription["status"]
+        subscription.cancel_at_period_end = stripe_subscription["cancel_at_period_end"]
+        
+        if "canceled_at" in stripe_subscription and stripe_subscription["canceled_at"]:
+            subscription.canceled_at = datetime.fromtimestamp(stripe_subscription["canceled_at"])
+        
+        # Save to database
+        subscriptions_db[subscription_id] = subscription
+        
+        return stripe_subscription
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
+        )
 
 
 def initialize_subscription_products() -> None:
@@ -1130,6 +1298,62 @@ def get_customer_payment_methods(customer_id: str, type: str = "card") -> List[D
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Customer not found"
         )
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
+        )
+
+
+def find_customer_by_email(email: str) -> Optional[Dict[str, Any]]:
+    """Find a customer in Stripe by email address
+    
+    This function searches for a Stripe customer with the specified email address.
+    Since Stripe doesn't provide a direct lookup by email, this function uses the
+    list API with filtering to find matching customers.
+    
+    Important considerations:
+    1. The search is case-sensitive
+    2. If multiple customers exist with the same email, the most recently created one is returned
+    3. This is slower than looking up by customer ID, so use only when necessary
+    
+    Use cases:
+    1. Finding a customer's Stripe ID when only their email is known
+    2. Checking if a customer already exists before creating a new one
+    3. Recovering a customer ID for an existing user
+    
+    Args:
+        email: The email address to search for
+        
+    Returns:
+        Dict containing the Stripe Customer object, or None if no match is found
+        
+    Raises:
+        HTTPException: If there's an error communicating with Stripe
+        
+    Stripe Documentation:
+        https://stripe.com/docs/api/customers/list
+    """
+    # If in test mode, return a mock customer if email looks valid
+    if TEST_MODE:
+        if '@' in email:
+            return {
+                "id": f"cus_test_{uuid.uuid4().hex[:8]}",
+                "email": email,
+                "name": email.split('@')[0],
+                "created": int(datetime.utcnow().timestamp())
+            }
+        return None
+    
+    try:
+        # Search for customers with the given email
+        customers = stripe.Customer.list(email=email, limit=1)
+        
+        # Return the first match (if any)
+        if customers.data:
+            return customers.data[0]
+        
+        return None
     except stripe.error.StripeError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

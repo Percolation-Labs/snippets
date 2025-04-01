@@ -48,6 +48,14 @@
         
         <div class="section">
             <h2>Subscription Plans</h2>
+            
+            {% if not has_customer and any(tier.price > 0 for tier in tiers) %}
+            <div style="margin-bottom: 15px; padding: 10px; background-color: #fff3cd; border-radius: 4px; border-left: 4px solid #856404; color: #856404;">
+                <strong>Note:</strong> You need to add a payment method before you can subscribe to a paid plan.
+                <a href="/payments/add-card" style="margin-left: 10px; text-decoration: underline;">Add Payment Method</a>
+            </div>
+            {% endif %}
+            
             <div class="plans">
                 {% for tier in tiers %}
                     <div class="plan {% if user.subscription_tier == tier.name %}current{% endif %}">
@@ -80,7 +88,7 @@
                             {% else %}
                                 <form method="post" action="/products/subscribe">
                                     <input type="hidden" name="tier_id" value="{{ tier.name }}">
-                                    <button type="submit" class="button">Subscribe</button>
+                                    <button type="submit" class="button" {% if not has_customer %}title="You need to add a payment method first"{% endif %}>Subscribe</button>
                                 </form>
                             {% endif %}
                         </div>
@@ -93,13 +101,21 @@
             <h2>Buy Tokens</h2>
             <div class="token-purchase">
                 <p>Tokens are used for API calls and other premium features. Each token costs ${{ products[0].price if products else 0.01 }}.</p>
+                
+                {% if not has_customer %}
+                <div style="margin-bottom: 15px; padding: 10px; background-color: #fff3cd; border-radius: 4px; border-left: 4px solid #856404; color: #856404;">
+                    <strong>Note:</strong> You need to add a payment method before you can purchase tokens.
+                    <a href="/payments/add-card" style="margin-left: 10px; text-decoration: underline;">Add Payment Method</a>
+                </div>
+                {% endif %}
+                
                 <form method="post" action="/products/buy-tokens">
                     <div class="form-group">
                         <label for="token_amount">Number of tokens to purchase:</label>
                         <input type="number" id="token_amount" name="token_amount" value="50" min="50" required>
                         <div class="token-price">Minimum purchase: 50 tokens</div>
                     </div>
-                    <button type="submit" class="button">Buy Tokens</button>
+                    <button type="submit" class="button" {% if not has_customer %}title="You need to add a payment method first"{% endif %}>Buy Tokens</button>
                 </form>
             </div>
         </div>

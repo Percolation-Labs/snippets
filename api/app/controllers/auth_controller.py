@@ -169,6 +169,9 @@ def enable_mfa(user_id: str) -> None:
 
 def create_session(user_id: str) -> str:
     """Create a new session for a user"""
+    
+    print(f"***Im creating a user session for user id {user_id}***")
+    
     session_id = secrets.token_hex(32)
     expires = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     
@@ -196,7 +199,9 @@ def get_user_profile(user_id: str, session_id: str, auth_method: str) -> UserPro
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid session"
         )
-    
+    expires = session.get("expires")
+    if expires and isinstance(expires,datetime):
+        expires = expires.isoformat()
     return UserProfile(
         user_id=user.id,
         email=user.email,
@@ -204,7 +209,7 @@ def get_user_profile(user_id: str, session_id: str, auth_method: str) -> UserPro
         avatar=user.avatar,
         session_id=session_id,
         auth_method=auth_method,
-        session_expiry=session["expires"],
+        session_expiry=expires,
         mfa_enabled=user.mfa_enabled
     )
 
@@ -228,29 +233,34 @@ async def get_google_user_info(access_token: str) -> Dict[str, Any]:
 
 async def exchange_google_code(code: str) -> Tuple[Dict[str, Any], str]:
     """Exchange authorization code for tokens with Google"""
-    async with httpx.AsyncClient() as client:
-        response = await client.post(
-            "https://oauth2.googleapis.com/token",
-            data={
-                "code": code,
-                "client_id": GOOGLE_CLIENT_ID,
-                "client_secret": GOOGLE_CLIENT_SECRET,
-                "redirect_uri": GOOGLE_REDIRECT_URI,
-                "grant_type": "authorization_code"
-            }
-        )
-        
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Failed to exchange Google authorization code"
+    try:
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://oauth2.googleapis.com/token",
+                data={
+                    "code": code,
+                    "client_id": GOOGLE_CLIENT_ID,
+                    "client_secret": GOOGLE_CLIENT_SECRET,
+                    "redirect_uri": GOOGLE_REDIRECT_URI,
+                    "grant_type": "authorization_code"
+                }
             )
-        
-        data = response.json()
-        access_token = data.get("access_token")
-        
-        user_info = await get_google_user_info(access_token)
-        return user_info, access_token
+            
+            if response.status_code != 200:
+                print(f"Google token exchange failed: {response.text}")
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Failed to exchange Google authorization code"
+                )
+            
+            data = response.json()
+            access_token = data.get("access_token")
+            
+            user_info = await get_google_user_info(access_token)
+            return user_info, access_token
+    except Exception as e:
+        print(f"Exception in exchange_google_code: {str(e)}")
+        raise
 
 
 def ensure_stripe_customer(user_id: str) -> str:
