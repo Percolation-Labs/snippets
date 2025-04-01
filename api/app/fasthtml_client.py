@@ -16,11 +16,9 @@ import stripe
 import uvicorn
 import asyncio
 
-from fasthtml import (
-    FastHTML, HTML, Head, Title, Meta, Style, Body, Div, H1, H2, H3,
-    A, P, Table, Tr, Th, Td, Form, Input, Button, Span, Strong, Ul, Li,
-    Label
-)
+from fasthtml import  FastHTML 
+from fasthtml.common import *
+ 
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.routing import Route, Mount
@@ -135,10 +133,11 @@ async def make_api_request(
 
 
 # Layout Components
-def BaseLayout(title: str, content, nav_items=None):
+def BaseLayout(title: str, content, nav_items=None, user=None):
     """Base layout for all pages"""
+    print(app, 'app')
     if nav_items is None:
-        if "user" in app.state:
+        if user:
             nav_items = [
                 {"text": "Home", "href": "/"},
                 {"text": "Profile", "href": "/profile"},
@@ -152,7 +151,7 @@ def BaseLayout(title: str, content, nav_items=None):
                 {"text": "Login", "href": "/login"}
             ]
     
-    return HTML(
+    return Html(
         Head(
             Title(f"{title} - API Test Client"),
             Meta(charset="utf-8"),
@@ -375,9 +374,10 @@ def PaymentRow(payment):
 
 # Route Handlers
 @app.get("/")
-async def index(request):
+async def index(session):
     """Home page"""
-    user = request.session.get("user")
+    print(session)
+    user = session.get("user")
     
     if user:
         content = Div(
@@ -399,7 +399,7 @@ async def index(request):
             class_="section"
         )
     
-    return BaseLayout("Home", content)
+    return BaseLayout("Home", content, None, user)
 
 
 @app.get("/login")

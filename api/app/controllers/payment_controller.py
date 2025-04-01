@@ -329,8 +329,13 @@ def create_subscription_product(tier: SubscriptionTier) -> Product:
 
 
 def get_all_products() -> List[Product]:
-    """Get all products"""
+    """Get all products in the database"""
+    
+    #the stripe products are in   stripe.Product.list(limit=100)  
+    
     return list(products_db.values())
+
+
 
 
 def get_product_by_name(name: str) -> Optional[Product]:
