@@ -5,6 +5,8 @@ from typing import List, Dict, Any, Optional
 
 import stripe
 from fastapi import HTTPException, status
+import percolate as p8
+from percolate.utils import make_uuid
 
 from app.models.payment import Product, Subscription, Payment, SubscriptionTier
 
@@ -62,8 +64,8 @@ tokens_product = {
 }
 
 
-def create_stripe_product(name: str, description: Optional[str] = None) -> Dict[str, Any]:
-    """Create a product in Stripe
+def create_stripe_product(name: str, description: Optional[str] = None, exists:str = 'ignore') -> Dict[str, Any]:
+    """Create a product in Stripe or update if it already exists
     
     In Stripe's payment model, Products represent the items or services that customers
     can purchase. Products have attributes like name, description, and can have multiple
@@ -76,32 +78,62 @@ def create_stripe_product(name: str, description: Optional[str] = None) -> Dict[
     Args:
         name: The name of the product (displayed to customers)
         description: Optional description of the product
+        exists: How to handle existing products with the same name
+               - 'ignore': Create a new product anyway (default)
+               - 'update': Update the existing product
+               - 'use': Return the existing product without changes
+               - 'raise': Raise an exception if the product exists
         
     Returns:
         Dict containing the Stripe Product object
         
     Raises:
-        HTTPException: If there's an error communicating with Stripe
+        HTTPException: If there's an error communicating with Stripe or if
+                      exists='raise' and a product with the name already exists
         
     Stripe Documentation:
         https://stripe.com/docs/api/products
         https://stripe.com/docs/products-prices/overview
     """
-    # If in test mode, return a mock product
     if TEST_MODE:
         return {
             "id": f"prod_test_{uuid.uuid4().hex[:8]}",
             "name": name,
-            "description": description,
-            "active": True
+            "description": description
         }
     
     try:
+        # Check if product already exists
+        existing_products = stripe.Product.list(limit=100)
+        matched_products = [p for p in existing_products.data if p['name'] == name and p['active']]
+        
+        if matched_products:
+            existing_product = matched_products[0]
+            
+            # Handle based on exists parameter
+            if exists == 'raise':
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"A Stripe product with the name '{name}' already exists"
+                )
+            elif exists == 'use':
+                return existing_product
+            elif exists == 'update':
+                # Update the existing product
+                updated_product = stripe.Product.modify(
+                    existing_product['id'],
+                    description=description
+                )
+                return updated_product
+            # For 'ignore', we'll just create a new product
+        
+        # Create a new product
         product = stripe.Product.create(
             name=name,
             description=description
         )
         return product
+        
     except stripe.error.StripeError as e:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -202,15 +234,7 @@ def create_stripe_subscription_price(product_id: str, price: float, currency: st
         https://stripe.com/docs/billing/subscriptions/overview
         https://stripe.com/docs/billing/subscriptions/build-subscriptions
     """
-    # If in test mode, return a mock price
-    if TEST_MODE:
-        return {
-            "id": f"price_sub_test_{uuid.uuid4().hex[:8]}",
-            "product": product_id,
-            "unit_amount": int(price * 100),
-            "currency": currency,
-            "recurring": {"interval": "month"}
-        }
+ 
     
     try:
         price_obj = stripe.Price.create(
@@ -233,52 +257,107 @@ def product_exists_by_name(name: str) -> bool:
 
 
 def create_product(name: str, description: Optional[str] = None, price: Optional[float] = None, 
-                   currency: str = "usd") -> Product:
-    """Create a product in the database and in Stripe"""
+                   currency: str = "usd", update_if_exists: bool = False) -> Product:
+    """Create a product in the database and in Stripe
+    
+    This function creates or updates a product in both the local database and Stripe.
+    If update_if_exists is True and a product with the same name already exists,
+    it will update the existing product instead of raising an exception.
+    
+    Args:
+        name: The name of the product
+        description: Optional description of the product
+        price: Optional price for the product
+        currency: The currency for the price (default: "usd")
+        update_if_exists: Whether to update existing products instead of raising an error
+        
+    Returns:
+        A Product object representing the product in the local database
+        
+    Raises:
+        HTTPException: If a product with the same name exists and update_if_exists is False
+    """
     # Check if a product with this name already exists
-    if product_exists_by_name(name):
+    existing_product = get_product_by_name(name)
+    
+    if existing_product and not update_if_exists:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"A product with the name '{name}' already exists"
         )
     
-    # Create in Stripe
-    stripe_product = create_stripe_product(name, description)
+    # Determine how to handle existing products in Stripe
+    exists_strategy = 'update' if update_if_exists else 'raise'
     
+    # Create or update in Stripe
+    if existing_product and update_if_exists:
+        # Update existing product
+        if existing_product.metadata and "stripe_product_id" in existing_product.metadata:
+            stripe_product_id = existing_product.metadata["stripe_product_id"]
+            try:
+                # Update the Stripe product
+                stripe_product = stripe.Product.modify(
+                    stripe_product_id,
+                    name=name,
+                    description=description,
+                    active=True
+                )
+            except:
+                # If updating fails, create a new one
+                stripe_product = create_stripe_product(name, description, exists='use')
+        else:
+            # No Stripe product ID, create a new one
+            stripe_product = create_stripe_product(name, description, exists='use')
+    else:
+        # Create a new product in Stripe
+        stripe_product = create_stripe_product(name, description, exists=exists_strategy)
+    
+    # Handle price update/creation
     price_id = None
     if price is not None:
-        stripe_price = create_stripe_price(stripe_product["id"], price, currency)
-        price_id = stripe_price["id"]
+        # Check if we need to create a new price or use existing
+        if existing_product and existing_product.price_id and existing_product.price == price:
+            # Use existing price
+            price_id = existing_product.price_id
+        else:
+            # Create new price in Stripe
+            stripe_price = create_stripe_price(stripe_product["id"], price, currency)
+            price_id = stripe_price["id"]
     
-    # Create in database
-    product_id = str(uuid.uuid4())
-    product = Product(
-        id=product_id,
-        name=name,
-        description=description,
-        active=True,
-        price_id=price_id,
-        price=price,
-        currency=currency,
-        metadata={"stripe_product_id": stripe_product["id"]}
-    )
+
+  
+        # Create new product
+        product_id = str(uuid.uuid4())
+        product = Product(
+            id=make_uuid(name),
+            stripe_price_id=price_id,
+            stripe_product_id=product_id,
+            name=name,
+            description=description,
+            active=True,
+            price_id=make_uuid(price_id), #the stripe price id is hashed
+            price=price,
+            currency=currency,
+            metadata={"stripe_product_id": stripe_product["id"]}
+        )
     
-    # Save to mock database (replace with real DB operation)
-    products_db[product_id] = product
+    # Save to database
+    p8.repository(Product).update_records(product)
     
     return product
 
 
-def create_subscription_product(tier: SubscriptionTier) -> Product:
-    """Create a subscription product in the database and in Stripe
+def create_subscription_product(tier: SubscriptionTier, update_if_exists: bool = True) -> Product:
+    """Create or update a subscription product in the database and in Stripe
     
     This function is a higher-level wrapper that handles both the Stripe integration
     and local database operations for creating subscription products.
     
     The function performs these steps:
-    1. Creates a Stripe Product representing the subscription tier
-    2. Creates a recurring Price for the Product with monthly billing
-    3. Saves the product details in the local database with metadata
+    1. Checks if a product for this tier already exists
+    2. Creates or updates a Stripe Product representing the subscription tier
+    3. Creates a recurring Price for the Product with monthly billing
+    4. Saves the product details in the local database with metadata
     
     Subscription tiers typically represent different service levels (Free, Individual, 
     Team, etc.) with varying features, pricing, and credit allocations. The tier
@@ -286,63 +365,81 @@ def create_subscription_product(tier: SubscriptionTier) -> Product:
     
     Args:
         tier: A SubscriptionTier object containing name, price, features, etc.
+        update_if_exists: Whether to update existing products instead of raising an error
         
     Returns:
         A Product object representing the subscription tier in the local database
         
     Raises:
-        HTTPException: If there's an error creating the product in Stripe
+        HTTPException: If there's an error creating the product in Stripe or if
+                      a product already exists and update_if_exists is False
         
     Stripe Documentation:
         https://stripe.com/docs/billing/subscriptions/multiple-products
         https://stripe.com/docs/products-prices/overview#subscription-products
     """
-    # Create in Stripe
-    stripe_product = create_stripe_product(f"{tier.name} Subscription", f"{tier.name} tier subscription")
+    product_name = f"{tier.name} Subscription"
+    product_description = f"{tier.name} tier subscription"
+        
+    # Create or update in Stripe
+    exists_strategy = 'update' if update_if_exists else 'raise'
+    stripe_product = create_stripe_product(product_name, product_description, exists=exists_strategy)
+    
+    # Create price in Stripe (prices can't be updated, only created)
     stripe_price = create_stripe_subscription_price(stripe_product["id"], tier.price, tier.currency)
     
+    print(f"IM IN HERE LOOKING AT PRICE - {stripe_price}")
     # Update tier with price ID
     tier.stripe_price_id = stripe_price["id"]
     
-    # Create in database
+
+    # Create new product
     product_id = str(uuid.uuid4())
     product = Product(
-        id=product_id,
-        name=f"{tier.name} Subscription",
-        description=f"{tier.name} tier subscription",
+        id=make_uuid(product_name), #we only allow one product per name
+        stripe_product_id=stripe_product['id'],
+        name=product_name,
+        description=product_description,
         active=True,
-        price_id=stripe_price["id"],
+        stripe_price_id=stripe_price["id"],
         price=tier.price,
-        currency=tier.currency,
+        product_type='subscription',
+        recurs=tier.recurs,
+        currency=tier.currency, 
+        price_id=make_uuid(stripe_price['id']), #this would be the id but we dont FK it
         metadata={
             "stripe_product_id": stripe_product["id"],
+            "stripe_price_id": stripe_price["id"],
             "type": "subscription",
             "tier": tier.name,
             "credits": tier.credits
         }
     )
-    
-    # Save to mock database (replace with real DB operation)
-    products_db[product_id] = product
+
+    """upsert"""
+    p8.repository(Product).update_records(product)
     
     return product
 
-
-def get_all_products() -> List[Product]:
+def get_all_stripe_products(limit: int=100) -> List[Product]:
+    """Get all products in stripe limited by 100"""   
+    return stripe.Product.list(limit=limit)  
+ 
+def get_all_db_products() -> List[Product]:
     """Get all products in the database"""
     
     #the stripe products are in   stripe.Product.list(limit=100)  
     
-    return list(products_db.values())
-
-
-
+    products = p8.repository(Product).select()
+    return [Product(**p) for p in products]
 
 def get_product_by_name(name: str) -> Optional[Product]:
-    """Get a product by name"""
-    for product in products_db.values():
-        if product.name == name:
-            return product
+    """Get a product by name from the database"""
+    products = p8.repository(Product).select(name=name)
+    if products:
+        if len(products) > 1:  # Check for multiple products
+            raise Exception("Invalid state: there are multiple products with the same name")
+        return Product(**products[0])
     return None
 
 
@@ -351,24 +448,27 @@ def delete_product_by_name(name: str) -> bool:
     product = get_product_by_name(name)
     
     if not product:
+        print(f"Product not found with name: {name}")
         return False
     
-    # Delete from Stripe if not in test mode
-    if not TEST_MODE and product.metadata and "stripe_product_id" in product.metadata:
-        try:
+    # First deactivate in Stripe if possible
+    try:
+        if product.metadata and "stripe_product_id" in product.metadata:
             stripe_product_id = product.metadata["stripe_product_id"]
             stripe.Product.modify(stripe_product_id, active=False)
-        except Exception as e:
-            # Log the error but continue with local deletion
-            print(f"Error deactivating Stripe product: {str(e)}")
+            print(f"Deactivated Stripe product: {stripe_product_id}")
+    except Exception as e:
+        # Log the error but continue with local deletion
+        print(f"Error deactivating Stripe product: {str(e)}")
     
-    # Delete from local database
-    product_id_to_delete = product.id
-    if product_id_to_delete in products_db:
-        del products_db[product_id_to_delete]
-        return True
-        
-    return False
+    # # Delete from database
+    # try:
+    #     p8.repository(Product).delete(id=product.id)
+    #     print(f"Deleted product from database: {name}")
+    #     return True
+    # except Exception as e:
+    #     print(f"Error deleting product from database: {str(e)}")
+    #     return False
 
 
 def get_subscription_tiers() -> List[SubscriptionTier]:
@@ -472,33 +572,7 @@ def create_checkout_session(price_id: str, success_url: str, cancel_url: str,
         https://stripe.com/docs/payments/checkout
         https://stripe.com/docs/payments/accept-a-payment?ui=checkout
     """
-    # If in test mode, return a mock checkout session
-    if TEST_MODE:
-        session_id = f"cs_test_{uuid.uuid4().hex[:16]}"
-        
-        # For token purchase, ensure we're meeting Stripe's minimum
-        if metadata and "tokens" in metadata:
-            tokens = int(metadata["tokens"])
-            price_per_token = tokens_product["price"]
-            amount = tokens * price_per_token
-            
-            if amount < 0.5:  # Stripe minimum is $0.50
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"Minimum purchase amount is $0.50. Please purchase at least {50} tokens."
-                )
-        
-        mock_session = {
-            "id": session_id,
-            "url": f"https://checkout.stripe.com/pay/{session_id}",
-            "metadata": metadata or {}
-        }
-        
-        # Add customer info to mock session if provided
-        if customer_id:
-            mock_session["customer"] = customer_id
-            
-        return mock_session
+ 
     
     try:
         # Create session parameters
@@ -575,20 +649,7 @@ def create_subscription_checkout_session(price_id: str, success_url: str, cancel
         https://stripe.com/docs/billing/subscriptions/checkout
         https://stripe.com/docs/billing/subscriptions/integrating-customer-portal
     """
-    # If in test mode, return a mock checkout session
-    if TEST_MODE:
-        session_id = f"cs_sub_test_{uuid.uuid4().hex[:16]}"
-        mock_session = {
-            "id": session_id,
-            "url": f"https://checkout.stripe.com/pay/{session_id}",
-            "metadata": metadata or {}
-        }
-        
-        # Add customer info to mock session if provided
-        if customer_id:
-            mock_session["customer"] = customer_id
-            
-        return mock_session
+ 
     
     try:
         # Create session parameters
@@ -1003,7 +1064,7 @@ def cancel_subscription(subscription_id: str, cancel_immediately: bool = False) 
         )
 
 
-def initialize_subscription_products() -> None:
+def initialize_subscription_products() -> List[Product]:
     """Initialize subscription products in Stripe and the database
     
     This function creates all subscription tiers as Products in Stripe and
@@ -1019,6 +1080,7 @@ def initialize_subscription_products() -> None:
     - Only non-free tiers are created in Stripe (free tiers don't require payment)
     - Each tier gets a Product and a recurring Price in Stripe
     - The Stripe Product/Price IDs are stored in your database for future reference
+    - Products are updated if they already exist to ensure consistency
     
     This function should be used:
     - During initial application deployment
@@ -1029,19 +1091,29 @@ def initialize_subscription_products() -> None:
     about modifying existing products. Consider creating new products instead
     and migrating customers as needed.
     
+    Returns:
+        List of Product objects that were created or updated
+    
     Stripe Documentation:
         https://stripe.com/docs/billing/subscriptions/set-up-subscription
         https://stripe.com/docs/billing/subscriptions/multiple-products
     """
+    added = []
+    
+    """we hard code some tiers for setting up test data - we could also sync from the database instead"""
     for tier_name, tier in SUBSCRIPTION_TIERS.items():
         if tier.price > 0:  # Don't create Stripe product for free tier
-            create_subscription_product(tier)
+            # Always update existing products if they exist
+            product = create_subscription_product(tier, update_if_exists=True)
+            added.append(product)
+            
+    return added
 
 
-def initialize_token_product() -> None:
+def initialize_token_product() -> Product:
     """Initialize token product in Stripe and the database
     
-    This function creates the token/credit product in Stripe and the local database.
+    This function creates or updates the token/credit product in Stripe and the local database.
     Tokens are a form of in-app currency that users can purchase and spend on
     API calls or premium features.
     
@@ -1056,20 +1128,25 @@ def initialize_token_product() -> None:
     - Stripe has minimum transaction amounts ($0.50 for USD)
     - Therefore, tokens are sold in bundles that meet the minimum
     - Different bundle sizes may offer volume discounts
+    - Products are updated if they already exist to ensure consistency
     
     This function is typically called:
     - During application initialization
     - When resetting test environments
     - When modifying token pricing
     
+    Returns:
+        Product object representing the token product
+    
     Stripe Documentation:
         https://stripe.com/docs/products-prices/pricing-models
         https://stripe.com/docs/billing/prices-guide
     """
-    create_product(
+    return create_product(
         name=tokens_product["name"],
         description=tokens_product["description"],
-        price=tokens_product["price"]
+        price=tokens_product["price"],
+        update_if_exists=True  # Always update existing token product if it exists
     )
 
 
@@ -1105,14 +1182,13 @@ def create_stripe_customer(user_id: str, email: str, name: Optional[str] = None)
         https://stripe.com/docs/api/customers/create
         https://stripe.com/docs/billing/customer
     """
-    # If in test mode, return a mock customer
-    if TEST_MODE:
-        return {
-            "id": f"cus_test_{uuid.uuid4().hex[:8]}",
-            "email": email,
-            "name": name,
-            "metadata": {"user_id": user_id}
-        }
+    
+    try:
+        existing_customer = find_customer_by_email(email=email)
+        if existing_customer:
+            return existing_customer
+    except:
+        print('customer does not exist - creating a new')
     
     try:
         # Create a customer in Stripe
@@ -1152,21 +1228,7 @@ def get_stripe_customer(customer_id: str) -> Dict[str, Any]:
     Stripe Documentation:
         https://stripe.com/docs/api/customers/retrieve
     """
-    # If in test mode, return a mock customer
-    if TEST_MODE:
-        if not customer_id.startswith("cus_"):
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Invalid customer ID format"
-            )
-        return {
-            "id": customer_id,
-            "email": "test@example.com",
-            "name": "Test Customer",
-            "default_source": None,
-            "invoice_settings": {"default_payment_method": None}
-        }
-    
+ 
     try:
         # Retrieve the customer from Stripe
         customer = stripe.Customer.retrieve(customer_id)
@@ -1274,22 +1336,7 @@ def get_customer_payment_methods(customer_id: str, type: str = "card") -> List[D
         https://stripe.com/docs/api/payment_methods/list
         https://stripe.com/docs/payments/payment-methods/overview
     """
-    # If in test mode, return mock payment methods
-    if TEST_MODE:
-        return [
-            {
-                "id": f"pm_test_{uuid.uuid4().hex[:8]}",
-                "type": "card",
-                "card": {
-                    "brand": "visa",
-                    "last4": "4242",
-                    "exp_month": 12,
-                    "exp_year": 2025,
-                },
-                "customer": customer_id,
-                "created": int(datetime.utcnow().timestamp())
-            }
-        ]
+
     
     try:
         # List payment methods for the customer
@@ -1309,6 +1356,306 @@ def get_customer_payment_methods(customer_id: str, type: str = "card") -> List[D
             detail=f"Stripe error: {str(e)}"
         )
 
+
+def get_stripe_customer_subscriptions(customer_id: str) -> List[Dict[str, Any]]:
+    """Get all active subscriptions for a customer directly from Stripe
+    
+    This function queries Stripe directly to get a list of all active subscriptions
+    for a given customer, ensuring we're using Stripe as the source of truth.
+    
+    Args:
+        customer_id: The Stripe customer ID
+        
+    Returns:
+        List of Stripe subscription objects
+        
+    Raises:
+        HTTPException: If there's an error communicating with Stripe
+    """
+    if TEST_MODE:
+        # In test mode, return empty list
+        return []
+    
+    try:
+        # List all active subscriptions for this customer
+        subscriptions = stripe.Subscription.list(
+            customer=customer_id,
+            status="active",
+            limit=100  # Limit should be enough for most customers
+        )
+        return subscriptions.data
+    except stripe.error.InvalidRequestError:
+        # Customer might not exist
+        print(f"Customer {customer_id} not found in Stripe or has no active subscriptions")
+        return []
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
+        )
+
+
+def cancel_user_stripe_subscriptions(
+    customer_id: str, 
+    exclude_subscription_id: Optional[str] = None,
+    cancel_immediately: bool = True
+) -> List[str]:
+    """Cancel all active subscriptions for a customer in Stripe
+    
+    When a user subscribes to a new tier, we should ensure they don't have
+    multiple active subscriptions. This function cancels all active subscriptions 
+    for a customer directly in Stripe, with an option to exclude a specific subscription.
+    
+    Args:
+        customer_id: The Stripe customer ID
+        exclude_subscription_id: Optional Stripe subscription ID to exclude from cancellation
+        cancel_immediately: Whether to cancel immediately (True) or at period end (False)
+        
+    Returns:
+        List of cancelled Stripe subscription IDs
+        
+    Raises:
+        HTTPException: If there's an error communicating with Stripe
+    """
+    if TEST_MODE:
+        # In test mode, simulate successful cancellation
+        return []
+    
+    # Get all active subscriptions for this customer directly from Stripe
+    active_subscriptions = get_stripe_customer_subscriptions(customer_id)
+    cancelled_ids = []
+    
+    # Filter out any excluded subscription
+    subscriptions_to_cancel = [
+        sub for sub in active_subscriptions 
+        if sub["id"] != exclude_subscription_id
+    ]
+    
+    # Cancel each subscription
+    for subscription in subscriptions_to_cancel:
+        try:
+            if cancel_immediately:
+                # Cancel immediately
+                cancelled_sub = stripe.Subscription.delete(subscription["id"])
+            else:
+                # Cancel at period end
+                cancelled_sub = stripe.Subscription.modify(
+                    subscription["id"],
+                    cancel_at_period_end=True
+                )
+            
+            cancelled_ids.append(subscription["id"])
+            
+            # Also update our local records if we have them
+            for local_sub_id, local_sub in subscriptions_db.items():
+                if local_sub.stripe_subscription_id == subscription["id"]:
+                    if cancel_immediately:
+                        local_sub.status = "canceled"
+                        local_sub.cancel_at_period_end = False
+                        local_sub.canceled_at = datetime.utcnow()
+                    else:
+                        local_sub.cancel_at_period_end = True
+                    
+                    # Save updated subscription back to database
+                    subscriptions_db[local_sub_id] = local_sub
+                    break
+                    
+        except Exception as e:
+            # Log error but continue with other subscriptions
+            print(f"Error canceling subscription {subscription['id']}: {str(e)}")
+    
+    return cancelled_ids
+
+
+def create_direct_subscription(
+    customer_id: str, 
+    price_id: str, 
+    metadata: Optional[Dict[str, Any]] = None,
+    cancel_existing: bool = True
+) -> Dict[str, Any]:
+    """Create a subscription directly using a saved payment method
+    
+    This function creates a subscription without requiring the customer to go through
+    a checkout flow. It uses the customer's default payment method or attempts to use
+    an available payment method.
+    
+    The direct subscription flow:
+    1. Verify the customer exists and has a valid payment method
+    2. Cancel existing subscriptions in Stripe if requested
+    3. Create the subscription with the specified price
+    4. Return the subscription details
+    
+    This is useful for seamless subscription upgrades or when customers have already
+    added a payment method and want a frictionless experience.
+    
+    Args:
+        customer_id: The Stripe customer ID
+        price_id: The Stripe price ID for the subscription
+        metadata: Optional dictionary of metadata to attach to the subscription
+        cancel_existing: Whether to cancel existing subscriptions (default: True)
+        
+    Returns:
+        Dict containing the Stripe Subscription object
+        
+    Raises:
+        HTTPException: If there's an error communicating with Stripe or if
+                      the customer has no valid payment method
+    
+    Stripe Documentation:
+        https://stripe.com/docs/api/subscriptions/create
+        https://stripe.com/docs/billing/subscriptions/create
+    """
+
+    
+    try:
+        # Check if customer has a valid payment method
+        payment_methods = get_customer_payment_methods(customer_id)
+        if not payment_methods:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Customer has no saved payment methods. Please add a payment method first."
+            )
+        
+        # Get customer to check for default payment method
+        customer = get_stripe_customer(customer_id)
+        default_payment_method = None
+        
+        if "invoice_settings" in customer and customer["invoice_settings"]:
+            default_payment_method = customer["invoice_settings"].get("default_payment_method")
+        
+        # Use default payment method if available, otherwise use the first one
+        payment_method_id = default_payment_method or payment_methods[0]["id"]
+        
+        # If we should cancel existing subscriptions, do it before creating the new one
+        if cancel_existing:
+            # Cancel existing Stripe subscriptions for this customer
+            # The new subscription doesn't exist yet, so no need to exclude anything
+            cancelled_subs = cancel_user_stripe_subscriptions(
+                customer_id=customer_id,
+                exclude_subscription_id=None,
+                cancel_immediately=True
+            )
+            if cancelled_subs:
+                print(f"Cancelled existing subscriptions for customer {customer_id}: {cancelled_subs}")
+        
+        # Create the subscription
+        subscription = stripe.Subscription.create(
+            customer=customer_id,
+            items=[
+                {"price": price_id}
+            ],
+            default_payment_method=payment_method_id,
+            expand=["latest_invoice.payment_intent"],
+            metadata=metadata or {}
+        )
+        
+        print('Stripe subscription: ',subscription)
+        
+        return subscription
+    except stripe.error.CardError as e:
+        # Payment failed
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Payment method was declined: {e.user_message}"
+        )
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
+        )
+
+def create_direct_payment(
+    customer_id: str, 
+    price_id: str, 
+    quantity: int = 1,
+    metadata: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Create a one-time payment directly using a saved payment method
+    
+    This function creates a payment intent and confirms it using the customer's
+    default payment method, without requiring a checkout flow. This provides a
+    seamless payment experience for customers who have already saved their
+    payment information.
+    
+    The direct payment flow:
+    1. Verify the customer exists and has a valid payment method
+    2. Create a payment intent for the specified price and quantity
+    3. Confirm the payment intent with the customer's default payment method
+    4. Return the payment intent details
+    
+    Args:
+        customer_id: The Stripe customer ID
+        price_id: The Stripe price ID for the product
+        quantity: The quantity of the product to purchase
+        metadata: Optional dictionary of metadata to attach to the payment intent
+        
+    Returns:
+        Dict containing the Stripe PaymentIntent object
+        
+    Raises:
+        HTTPException: If there's an error communicating with Stripe or if
+                      the customer has no valid payment method
+    
+    Stripe Documentation:
+        https://stripe.com/docs/api/payment_intents
+        https://stripe.com/docs/payments/save-and-reuse
+    """
+    if TEST_MODE:
+        return {
+            "id": f"pi_test_{uuid.uuid4().hex[:8]}",
+            "customer": customer_id,
+            "status": "succeeded",
+            "amount": 1000,  # Example amount in cents
+            "currency": "usd",
+            "metadata": metadata or {}
+        }
+    
+    try:
+        # Get price information
+        price = stripe.Price.retrieve(price_id)
+        amount = price.unit_amount * quantity
+        
+        # Check if customer has a valid payment method
+        payment_methods = get_customer_payment_methods(customer_id)
+        if not payment_methods:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Customer has no saved payment methods. Please add a payment method first."
+            )
+        
+        # Get customer to check for default payment method
+        customer = get_stripe_customer(customer_id)
+        default_payment_method = None
+        
+        if "invoice_settings" in customer and customer["invoice_settings"]:
+            default_payment_method = customer["invoice_settings"].get("default_payment_method")
+        
+        # Use default payment method if available, otherwise use the first one
+        payment_method_id = default_payment_method or payment_methods[0]["id"]
+        
+        # Create the payment intent
+        payment_intent = stripe.PaymentIntent.create(
+            amount=amount,
+            currency=price.currency,
+            customer=customer_id,
+            payment_method=payment_method_id,
+            off_session=True,
+            confirm=True,  # Confirm immediately
+            metadata=metadata or {}
+        )
+        
+        return payment_intent
+    except stripe.error.CardError as e:
+        # Payment failed
+        raise HTTPException(
+            status_code=status.HTTP_402_PAYMENT_REQUIRED,
+            detail=f"Payment method was declined: {e.user_message}"
+        )
+    except stripe.error.StripeError as e:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Stripe error: {str(e)}"
+        )
 
 def find_customer_by_email(email: str) -> Optional[Dict[str, Any]]:
     """Find a customer in Stripe by email address
@@ -1339,16 +1686,6 @@ def find_customer_by_email(email: str) -> Optional[Dict[str, Any]]:
     Stripe Documentation:
         https://stripe.com/docs/api/customers/list
     """
-    # If in test mode, return a mock customer if email looks valid
-    if TEST_MODE:
-        if '@' in email:
-            return {
-                "id": f"cus_test_{uuid.uuid4().hex[:8]}",
-                "email": email,
-                "name": email.split('@')[0],
-                "created": int(datetime.utcnow().timestamp())
-            }
-        return None
     
     try:
         # Search for customers with the given email

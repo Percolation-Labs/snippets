@@ -88,7 +88,8 @@ def initialize_products(session_id):
     
     result = response.json()
     print(f"✓ Successfully initialized products!")
-    print(f"  Products added: {result['products_added']}")
+    print(f"  Products created: {result.get('products_created', 0)}")
+    print(f"  Products updated: {result.get('products_updated', 0)}")
     print(f"  Subscription products: {result['subscription_products']}")
     print(f"  Token product: {'Added' if result['token_product'] else 'Failed to add'}")
     

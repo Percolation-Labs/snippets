@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field
 import stripe
 from app.controllers import payment_controller, auth_controller
 from app.models.payment import Product, SubscriptionTier, Payment, PaymentCreate, Subscription
+from app.models.user import UserProfile
 
 router = APIRouter()
 
@@ -60,25 +61,17 @@ class PaymentMethodResponse(BaseModel):
     is_default: bool = False
 
 
-# Helper function to get current user
+ 
 def get_current_user_id(session_id: str = Cookie(None)):
-    print(f"IM LOOKING FPR CURRENT USER FOR SID {session_id} and i have sessions {auth_controller.sessions}")
-    """Get the current user ID from session"""
-    if not session_id or session_id not in auth_controller.sessions:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated"
-        )
-    
-    session = auth_controller.sessions[session_id]
-    return session["user_id"]
+    """"""
+    return auth_controller.get_user_profile_from_valid_session(session_id).id
 
 
 # Payment endpoints
 @router.get("/products", response_model=List[Product])
 async def get_products():
     """Get all products"""
-    return payment_controller.get_all_products()
+    return payment_controller.get_all_db_products()
 
 
 @router.post("/products", response_model=Product)
@@ -160,9 +153,14 @@ async def create_checkout(request: CheckoutRequest, session_id: str = Cookie(Non
     return CheckoutSession(url=checkout["url"])
 
 
-@router.post("/subscribe", response_model=CheckoutSession)
-async def create_subscription(request: SubscriptionCheckoutRequest, session_id: str = Cookie(None)):
-    """Create a subscription checkout session"""
+
+@router.post("/subscribe-checkout", response_model=CheckoutSession)
+async def create_subscription_checkout(request: SubscriptionCheckoutRequest, session_id: str = Cookie(None)):
+    """Create a subscription checkout session with an external payment page
+    
+    This endpoint creates a Stripe Checkout session for subscription payments.
+    The user will be redirected to Stripe's hosted checkout page to complete payment.
+    """
     user_id = get_current_user_id(session_id)
     
     # Get subscription tier
@@ -194,9 +192,114 @@ async def create_subscription(request: SubscriptionCheckoutRequest, session_id: 
     return CheckoutSession(url=checkout["url"])
 
 
-@router.post("/buy-tokens", response_model=CheckoutSession)
-async def buy_tokens(request: TokenPurchase, session_id: str = Cookie(None)):
-    """Buy tokens/credits using real Stripe integration"""
+class DirectSubscriptionRequest(BaseModel):
+    """Request model for direct subscription creation using saved payment method"""
+    tier: str
+
+
+class SubscriptionResponse(BaseModel):
+    """Response model for subscription operations"""
+    id: str
+    status: str
+    current_period_start: datetime
+    current_period_end: datetime
+    customer_id: str
+    tier_name: str
+
+
+@router.post("/subscribe", response_model=SubscriptionResponse)
+async def create_direct_subscription(request: DirectSubscriptionRequest, session_id: str = Cookie(None)):
+    """Create a subscription using the customer's saved payment method
+    
+    This endpoint creates a subscription directly without redirecting to a checkout page.
+    It uses the customer's default payment method (or first available method) to
+    immediately process the subscription.
+    
+    The customer must have at least one valid payment method saved to their account.
+    """
+    user_id = get_current_user_id(session_id)
+    
+    tier:Product = payment_controller.get_product_by_name(request.tier)
+    # # Get subscription tier - this should be from the database but 
+    # tier = payment_controller.SUBSCRIPTION_TIERS.get(request.tier)
+    # if not tier:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_404_NOT_FOUND,
+    #         detail="Subscription tier not found. Available tiers: " + ", ".join(payment_controller.SUBSCRIPTION_TIERS.keys())
+    #     )
+    
+    # if not tier.stripe_price_id:
+    #     raise HTTPException(
+    #         status_code=status.HTTP_400_BAD_REQUEST,
+    #         detail="Subscription tier is not properly initialized in Stripe. Please run the initialize products script first."
+    #     )
+    
+    # Ensure the user has a Stripe customer ID
+    customer_id = auth_controller.ensure_stripe_customer(user_id)
+    
+    # Create direct subscription using saved payment method
+    # The create_direct_subscription function will handle cancelling existing subscriptions
+    try:
+        subscription = payment_controller.create_direct_subscription(
+            customer_id=customer_id,
+            price_id=tier.stripe_price_id,
+            metadata={"user_id": user_id, "tier": tier.name},
+            cancel_existing=True  # Cancel existing subscriptions in Stripe before creating new one
+        )
+     
+        #do this in the webhook maybe   
+        # # Process subscription creation (similar to webhook handling)
+        # if subscription["status"] == "active":
+        #     # Find product for this tier to get its ID
+        #     product_id = None
+        #     for p in payment_controller.products_db.values():
+        #         if p.metadata and p.metadata.get("tier") == tier.name:
+        #             product_id = p.id
+        #             break
+            
+        #     if product_id:
+        #         # Record subscription in our database
+        #         payment_controller.record_subscription(
+        #             user_id=user_id,
+        #             product_id=tier.id,
+        #             stripe_subscription_id=subscription["id"],
+        #             current_period_start=datetime.fromtimestamp(subscription["current_period_start"]),
+        #             current_period_end=datetime.fromtimestamp(subscription["current_period_end"])
+        #         )
+                
+        #         # Update user subscription tier
+        #         payment_controller.update_user_subscription_tier(user_id, tier.name)
+                
+        #         # Add subscription credits
+        #         #payment_controller.update_user_credits(user_id, tier.credits)
+        
+        return SubscriptionResponse(
+            id=subscription["id"],
+            status=subscription["status"],
+            current_period_start=datetime.fromtimestamp(subscription["current_period_start"]),
+            current_period_end=datetime.fromtimestamp(subscription["current_period_end"]),
+            customer_id=customer_id,
+            tier_name=tier.name
+        )
+    
+    except HTTPException:
+        # Pass through HTTP exceptions
+        raise
+    except Exception as e:
+        # Handle other exceptions
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to create subscription: {str(e)}"
+        )
+
+
+@router.post("/buy-tokens-checkout", response_model=CheckoutSession)
+async def buy_tokens_checkout(request: TokenPurchase, session_id: str = Cookie(None)):
+    """Buy tokens/credits using a Stripe external checkout flow
+    
+    This endpoint creates a Stripe Checkout session for token purchases.
+    The user will be redirected to Stripe's hosted checkout page to complete payment.
+    """
     user_id = get_current_user_id(session_id)
     
     # Find tokens product
@@ -239,32 +342,104 @@ async def buy_tokens(request: TokenPurchase, session_id: str = Cookie(None)):
     return CheckoutSession(url=checkout["url"])
 
 
-@router.post("/test/buy-tokens", response_model=CheckoutSession)
-async def test_buy_tokens(request: TokenPurchase, session_id: str = Cookie(None)):
-    """Buy tokens/credits (test mode version that doesn't interact with Stripe)"""
+class DirectTokenPurchaseRequest(BaseModel):
+    """Request model for direct token purchase using saved payment method"""
+    amount: int
+    name: str = 'Tokens' #Default vanilla tokens
+
+class TokenPurchaseResponse(BaseModel):
+    """Response model for token purchase operations"""
+    payment_id: str
+    amount: int
+    status: str
+    customer_id: str
+
+
+@router.post("/buy-tokens", response_model=TokenPurchaseResponse)
+async def buy_tokens_direct(request: DirectTokenPurchaseRequest, session_id: str = Cookie(None)):
+    """Buy tokens/credits using the customer's saved payment method
+    
+    This endpoint purchases tokens directly without redirecting to a checkout page.
+    It uses the customer's default payment method (or first available method) to
+    immediately process the payment.
+    
+    The customer must have at least one valid payment method saved to their account.
+    """
     user_id = get_current_user_id(session_id)
     
-    # Validate amount
-    if request.amount <= 0:
+    # Find tokens product
+    token_product = payment_controller.get_product_by_name(request.name)
+ 
+    if not token_product :
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Token amount must be positive"
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Token product {request.name} not found in the database"
         )
     
-    # Create a fake checkout URL
-    session_id = f"test_session_{uuid.uuid4().hex[:16]}"
-    checkout_url = f"https://example.com/test-checkout/{session_id}"
+    print("Purchasing the token product", token_product)
+    # Ensure minimum purchase amount for Stripe ($0.50)
+    token_price = token_product.price
+    min_tokens = max(50, int(0.5 / token_price) + 1)  # At least 50 or enough to meet $0.50+
     
-    # Simulate adding credits to the user immediately in test mode
-    from app.controllers.auth_controller import users_db
-    user = users_db.get(user_id)
-    if user:
-        user.credits += request.amount
-        users_db[user_id] = user
+    if request.amount < min_tokens:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Minimum token purchase is {min_tokens} tokens (${min_tokens * token_price:.2f})"
+        )
     
-    return CheckoutSession(url=checkout_url)
+    # Ensure the user has a Stripe customer ID
+    customer_id = auth_controller.ensure_stripe_customer(user_id)
+    
+    try:
+        # Create direct payment using saved payment method
+        payment_intent = payment_controller.create_direct_payment(
+            customer_id=customer_id,
+            price_id=token_product.stripe_price_id,
+            quantity=request.amount,
+            metadata={"user_id": user_id, "tokens": request.amount}
+        )
+        
+        # Process successful payment (similar to webhook handling)
+        if payment_intent["status"] == "succeeded":
+            # Record payment
+            #TODO record payments
+            # payment = payment_controller.record_payment(
+            #     user_id=user_id,
+            #     amount=payment_intent["amount"] / 100,  # Convert from cents
+            #     currency=payment_intent["currency"],
+            #     payment_method="stripe",
+            #     stripe_payment_id=payment_intent["id"],
+            #     metadata={"tokens": request.amount}
+            # )
+            
+            # # Add credits to the user's account
+            # payment_controller.update_user_credits(user_id, request.amount)
+            
+            return TokenPurchaseResponse(
+                payment_id=payment_intent["id"],
+                amount=request.amount,
+                status=payment_intent["status"],
+                customer_id=customer_id
+            )
+        else:
+            # Payment not succeeded
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=f"Payment failed with status: {payment_intent['status']}"
+            )
+    
+    except HTTPException:
+        # Pass through HTTP exceptions
+        raise
+    except Exception as e:
+        # Handle other exceptions
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to purchase tokens: {str(e)}"
+        )
 
 
+ 
 @router.post("/webhook", status_code=status.HTTP_200_OK)
 async def stripe_webhook(request: Request):
     """Handle Stripe webhook events"""
@@ -342,6 +517,26 @@ async def stripe_webhook(request: Request):
             tier = metadata.get("tier")
             
             if tier:
+                # Find the user's Stripe customer ID and cancel existing subscriptions
+                user = auth_controller.users_db.get(user_id)
+                if user and user.stripe_customer_id:
+                    # Cancel existing subscriptions in Stripe to avoid multiple active subscriptions
+                    try:
+                        # This will cancel all active subscriptions for the customer in Stripe
+                        # We exclude the newly created subscription to avoid cancelling it
+                        cancelled_subs = payment_controller.cancel_user_stripe_subscriptions(
+                            customer_id=user.stripe_customer_id,
+                            exclude_subscription_id=subscription_id,  # Exclude the new subscription
+                            cancel_immediately=True
+                        )
+                        if cancelled_subs:
+                            print(f"Cancelled existing Stripe subscriptions: {cancelled_subs}")
+                    except Exception as e:
+                        # Log error but continue processing the new subscription
+                        print(f"Error canceling existing Stripe subscriptions: {str(e)}")
+                else:
+                    print(f"Warning: Could not find Stripe customer ID for user {user_id} to cancel existing subscriptions")
+                
                 # Update user subscription tier
                 payment_controller.update_user_subscription_tier(user_id, tier)
                 
@@ -358,7 +553,7 @@ async def stripe_webhook(request: Request):
                         break
                 
                 if product_id:
-                    payment_controller.record_subscription(
+                    new_subscription = payment_controller.record_subscription(
                         user_id=user_id,
                         product_id=product_id,
                         stripe_subscription_id=subscription_id,
@@ -560,26 +755,17 @@ async def get_payment_methods(session_id: str = Cookie(None)):
     This endpoint returns all payment methods associated with the user's 
     Stripe customer account.
     """
-    # Get user ID
+    
+    """determine the user ud from session and load"""
     user_id = get_current_user_id(session_id)
+    user = auth_controller.get_user_model(user_id)
     
-    # Get user from database
-    user = auth_controller.users_db.get(user_id)
-    if not user:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="User not found"
-        )
-    
-    # If user has no Stripe customer ID, return empty list
+    """the user normally should have a customer id but we can make sure"""
     if not user.stripe_customer_id:
-        return []
+        auth_controller.ensure_stripe_customer(user_id)
     
     try:
-        # Get payment methods from Stripe
         payment_methods = payment_controller.get_customer_payment_methods(user.stripe_customer_id)
-        
-        # Get the customer to determine default payment method
         customer = payment_controller.get_stripe_customer(user.stripe_customer_id)
         default_pm_id = None
         if "invoice_settings" in customer and customer["invoice_settings"]:
@@ -593,7 +779,6 @@ async def get_payment_methods(session_id: str = Cookie(None)):
                 type=pm["type"],
                 is_default=pm["id"] == default_pm_id
             )
-            
             # Add card-specific fields if this is a card
             if pm["type"] == "card" and "card" in pm:
                 pm_data.brand = pm["card"]["brand"]
@@ -605,10 +790,8 @@ async def get_payment_methods(session_id: str = Cookie(None)):
         
         return result
     except HTTPException as e:
-        # If we get a 404 (customer not found), return empty list
         if e.status_code == 404:
             return []
-        # Otherwise re-raise
         raise e
 
 
@@ -618,7 +801,7 @@ async def add_payment_method(
     session_id: str = Cookie(None)
 ):
     """
-    Add a payment method to the user's account
+    Add a payment method to the user's account (callback from stripe elements)
     
     This endpoint attaches a payment method to the user's Stripe customer account.
     The payment_method_id should be obtained from Stripe Elements on the client side.
@@ -632,12 +815,6 @@ async def add_payment_method(
     try:
         # Ensure the user has a Stripe customer
         customer_id = auth_controller.ensure_stripe_customer(user_id)
-        
-        # Update the user in the database to store the Stripe customer ID
-        user = auth_controller.users_db.get(user_id)
-        if user and not user.stripe_customer_id:
-            user.stripe_customer_id = customer_id
-            auth_controller.users_db[user_id] = user
         
         # Attach the payment method to the customer
         stripe_instance = payment_controller.stripe
@@ -653,6 +830,8 @@ async def add_payment_method(
                 customer_id,
                 invoice_settings={"default_payment_method": payment_method_id}
             )
+        
+        """we dont necessarily need to get save the payment methods in our database - we could in future"""
         
         return {
             "status": "success", 
@@ -673,23 +852,16 @@ async def set_default_payment_method(
     session_id: str = Cookie(None)
 ):
     """
-    Set a payment method as the default for the user
+    Set a payment method as the default for the user (on stripe)
     
     This endpoint sets the specified payment method as the default for the user's
     Stripe customer account. All future payments and subscriptions will use this
     payment method by default.
     """
-    # Get user ID
-    user_id = get_current_user_id(session_id)
-    
+
     try:
-        # Get user from database
-        user = auth_controller.users_db.get(user_id)
-        if not user or not user.stripe_customer_id:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="User has no Stripe customer ID"
-            )
+        user_id = get_current_user_id(session_id)
+        user = auth_controller.get_user_model(user_id)
         
         # Verify the payment method exists and belongs to this customer
         payment_methods = payment_controller.get_customer_payment_methods(user.stripe_customer_id)
@@ -699,7 +871,6 @@ async def set_default_payment_method(
                 detail="Payment method not found for this customer"
             )
         
-        # Set as default
         stripe_instance = payment_controller.stripe
         stripe_instance.Customer.modify(
             user.stripe_customer_id,
@@ -709,7 +880,6 @@ async def set_default_payment_method(
         return {"status": "success", "default_payment_method": payment_method_id}
     
     except HTTPException:
-        # Re-raise HTTP exceptions
         raise
     except Exception as e:
         raise HTTPException(
@@ -891,80 +1061,12 @@ async def find_customer_by_email(email: str, session_id: str = Cookie(None)):
             detail=str(e)
         )
 
-
 @router.post("/initialize-products")
-async def initialize_products(session_id: str = Cookie(None)):
+async def initialize_products(session_id: str = Cookie(None))->List[Product]:
     """Initialize all default products (subscription tiers and tokens)"""
 
-    # Count products before initialization
-    products_before = len(payment_controller.products_db)
-    
-    # Initialize subscription products
-    subscription_products = []
-    try:
-        # First check if subscription products already exist
-        existing_subscription_products = [p for p in payment_controller.products_db.values() 
-                                         if p.metadata and p.metadata.get("type") == "subscription"]
-        
-        # If they exist but don't have proper recurring settings, remove them
-        if existing_subscription_products:
-            for product in existing_subscription_products:
-                payment_controller.delete_product_by_name(product.name)
-                print(f"Removed existing subscription product: {product.name}")
-        
-        # Initialize subscription products with monthly recurring billing
-        payment_controller.initialize_subscription_products()
-        subscription_products = [p for p in payment_controller.products_db.values() 
-                                if p.metadata and p.metadata.get("type") == "subscription"]
-    except Exception as e:
-        # Log error but continue
-        print(f"Error initializing subscription products: {str(e)}")
-    
-    # Initialize token product
-    token_product = None
-    try:
-        # First check if token product already exists
-        existing_token_product = next((p for p in payment_controller.products_db.values() 
-                                      if p.name == payment_controller.tokens_product["name"]), None)
-        
-        # If it exists but doesn't have proper settings, remove it
-        if existing_token_product:
-            payment_controller.delete_product_by_name(existing_token_product.name)
-            print(f"Removed existing token product: {existing_token_product.name}")
-        
-        # Initialize token product
-        payment_controller.initialize_token_product()
-        token_product = next((p for p in payment_controller.products_db.values() 
-                            if p.name == payment_controller.tokens_product["name"]), None)
-        
-        if token_product:
-            print(f"Token product initialized: {token_product.name} with price: ${token_product.price}")
-        else:
-            print("Failed to initialize token product")
-    except Exception as e:
-        # Log error but continue
-        print(f"Error initializing token product: {str(e)}")
-    
-    # Count products after initialization
-    products_after = len(payment_controller.products_db)
-    products_added = products_after - products_before
-    
-    return {
-        "success": True,
-        "products_added": products_added,
-        "subscription_products": len(subscription_products),
-        "token_product": token_product is not None,
-        "token_product_details": {
-            "name": token_product.name if token_product else None,
-            "price": token_product.price if token_product else None,
-            "price_id": token_product.price_id if token_product else None
-        },
-        "subscription_tiers": [
-            {
-                "name": p.name,
-                "price": p.price,
-                "recurring": "monthly",
-                "price_id": p.price_id
-            } for p in subscription_products
-        ]
-    }
+    products = payment_controller.initialize_subscription_products()
+    token = payment_controller.initialize_token_product()
+    return products + [token]
+ 
+ 

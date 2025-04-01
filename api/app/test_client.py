@@ -1347,14 +1347,17 @@ async def products_page(
 
 @app.post("/products/buy-tokens")
 async def buy_tokens(
-    session ,
-    token_amount: int = Form(...)
-
+    session,
+    token_amount: int = Form(...),
+    use_saved_payment: Optional[bool] = Form(False)
 ):
     """Buy tokens
     
-    This function creates a checkout session for purchasing tokens through the API.
-    It ensures the user has a Stripe customer ID and sends the success/cancel URLs.
+    This function allows purchasing tokens through the API using either:
+    1. A Stripe Checkout session (default) - redirects to Stripe's payment page
+    2. Direct purchase using a saved payment method - processes immediately
+    
+    It ensures the user has a Stripe customer ID and handles the payment flow accordingly.
     """
     if not session:
         return RedirectResponse(url="/login")
@@ -1383,21 +1386,30 @@ async def buy_tokens(
                 print(f"Error retrieving customer ID: {str(e)}")
                 # Continue anyway, the API will handle it
         
-        # Get the base URL for success/cancel URLs
+        # Get the base URL for success/cancel URLs (needed for checkout flow)
         base_url = str(API_BASE_URL)
         success_url = f"{base_url}/payments/success?session_id={{CHECKOUT_SESSION_ID}}"
         cancel_url = f"{base_url}/payments"
         
-        # Create checkout session for tokens
-        print(f"Creating token purchase for {token_amount} tokens")
+        # Determine which endpoint to use based on the use_saved_payment flag
+        endpoint = "/payments/buy-tokens" if use_saved_payment else "/payments/buy-tokens-checkout"
+        
+        # Prepare the request data
+        request_data = {
+            "amount": token_amount
+        }
+        
+        # Add success and cancel URLs for checkout flow
+        if not use_saved_payment:
+            request_data["success_url"] = success_url
+            request_data["cancel_url"] = cancel_url
+        
+        # Create token purchase (direct or checkout)
+        print(f"Creating token purchase for {token_amount} tokens using {'saved payment method' if use_saved_payment else 'checkout flow'}")
         response = await make_api_request(
             "post",
-            "/payments/buy-tokens",
-            {
-                "amount": token_amount,
-                "success_url": success_url,
-                "cancel_url": cancel_url
-            },
+            endpoint,
+            request_data,
             token=session_id
         )
         
@@ -1405,25 +1417,37 @@ async def buy_tokens(
         print(f"Token purchase response: {response}")
         
         if "error" in response:
-            error_message = response.get("error", "Failed to create checkout session")
+            error_message = response.get("error", "Failed to create token purchase")
             print(f"Token purchase error: {error_message}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=error_message
             )
         
-        # Redirect to Stripe checkout
-        checkout_url = response.get("url")
-        if not checkout_url:
-            raise Exception("No checkout URL returned from API")
+        if use_saved_payment:
+            # Direct purchase - process was completed immediately
+            # Update user's credits (this should happen automatically server-side,
+            # but we'll update the session for immediate feedback)
+            session["user"]["credits"] = session["user"].get("credits", 0) + token_amount
             
-        return RedirectResponse(url=checkout_url, status_code=status.HTTP_302_FOUND)
+            # Redirect to payments page with success message
+            return RedirectResponse(
+                url="/payments?success=true&message=Successfully+purchased+" + str(token_amount) + "+tokens",
+                status_code=status.HTTP_302_FOUND
+            )
+        else:
+            # Checkout flow - redirect to Stripe checkout
+            checkout_url = response.get("url")
+            if not checkout_url:
+                raise Exception("No checkout URL returned from API")
+                
+            return RedirectResponse(url=checkout_url, status_code=status.HTTP_302_FOUND)
         
     except HTTPException as he:
         # Re-raise HTTP exceptions
         raise he
     except Exception as e:
-        print(f"Error creating token checkout: {str(e)}")
+        print(f"Error processing token purchase: {str(e)}")
         
         # If API call fails, simulate a success for testing purposes
         # Add to user's credits
@@ -1439,13 +1463,16 @@ async def buy_tokens(
 @app.post("/products/subscribe")
 async def subscribe(
     session,
-    tier_id: str = Form(...)
-    
+    tier_id: str = Form(...),
+    use_saved_payment: Optional[bool] = Form(False)
 ):
     """Subscribe to a plan
     
-    This function creates a subscription checkout session through the API.
-    It ensures the user has a Stripe customer ID and sends the success/cancel URLs.
+    This function allows subscription through the API using either:
+    1. A Stripe Checkout session (default) - redirects to Stripe's payment page
+    2. Direct subscription using a saved payment method - processes immediately
+    
+    It ensures the user has a Stripe customer ID and handles the subscription flow accordingly.
     """
     if not session:
         return RedirectResponse(url="/login")
@@ -1474,21 +1501,30 @@ async def subscribe(
                 print(f"Error retrieving customer ID: {str(e)}")
                 # Continue anyway, the API will handle it
         
-        # Get the base URL for success/cancel URLs
+        # Get the base URL for success/cancel URLs (needed for checkout flow)
         base_url = str(API_BASE_URL)
         success_url = f"{base_url}/payments/success?session_id={{CHECKOUT_SESSION_ID}}"
         cancel_url = f"{base_url}/payments"
         
-        # Create subscription checkout session
-        print(f"Creating subscription for tier: {tier_id}")
+        # Determine which endpoint to use based on the use_saved_payment flag
+        endpoint = "/payments/subscribe" if use_saved_payment else "/payments/subscribe-checkout"
+        
+        # Prepare the request data
+        request_data = {
+            "tier": tier_id
+        }
+        
+        # Add success and cancel URLs for checkout flow
+        if not use_saved_payment:
+            request_data["success_url"] = success_url
+            request_data["cancel_url"] = cancel_url
+        
+        # Create subscription (direct or checkout)
+        print(f"Creating subscription for tier: {tier_id} using {'saved payment method' if use_saved_payment else 'checkout flow'}")
         response = await make_api_request(
             "post",
-            "/payments/subscribe",
-            {
-                "tier": tier_id,
-                "success_url": success_url,
-                "cancel_url": cancel_url
-            },
+            endpoint,
+            request_data,
             token=session_id
         )
         
@@ -1503,12 +1539,37 @@ async def subscribe(
                 detail=error_message
             )
         
-        # Redirect to Stripe checkout
-        checkout_url = response.get("url")
-        if not checkout_url:
-            raise Exception("No checkout URL returned from API")
+        if use_saved_payment:
+            # Direct subscription - process was completed immediately
+            # Update user's subscription tier (this should happen automatically server-side,
+            # but we'll update the session for immediate feedback)
+            session["user"]["subscription_tier"] = tier_id
             
-        return RedirectResponse(url=checkout_url, status_code=status.HTTP_302_FOUND)
+            # Get tier details for credits
+            mock_tiers = [
+                {"name": "Free", "price": 0, "credits": 5},
+                {"name": "Individual", "price": 9.99, "credits": 100},
+                {"name": "Team", "price": 49.99, "credits": 500},
+                {"name": "Enterprise", "price": 199.99, "credits": 2000}
+            ]
+            
+            selected_tier = next((t for t in mock_tiers if t["name"] == tier_id), None)
+            if selected_tier:
+                # Add subscription credits
+                session["user"]["credits"] = session["user"].get("credits", 0) + selected_tier["credits"]
+            
+            # Redirect to payments page with success message
+            return RedirectResponse(
+                url="/payments?success=true&message=Successfully+subscribed+to+" + tier_id + "+plan",
+                status_code=status.HTTP_302_FOUND
+            )
+        else:
+            # Checkout flow - redirect to Stripe checkout
+            checkout_url = response.get("url")
+            if not checkout_url:
+                raise Exception("No checkout URL returned from API")
+                
+            return RedirectResponse(url=checkout_url, status_code=status.HTTP_302_FOUND)
         
     except HTTPException as he:
         # Re-raise HTTP exceptions
@@ -1535,6 +1596,9 @@ async def subscribe(
         
         # Update user's subscription tier
         session["user"]["subscription_tier"] = tier_id
+        
+        # Add subscription credits
+        session["user"]["credits"] = session["user"].get("credits", 0) + selected_tier["credits"]
         
         # Redirect to payments page with success message
         return RedirectResponse(

@@ -25,10 +25,12 @@ def PlanCard(tier: Dict[str, Any], user_subscription_tier: str, has_customer: bo
     else:
         price_display = f"${price}<span class=\"period\">/month</span>"
     
-    # Create the action button
+    # Create the action button(s)
     if is_current:
+        # Current plan - just show disabled button
         action_button = Button("Current Plan", class_="button current", disabled=True)
     elif price == 0:
+        # Free plan - simple switch button
         action_button = Form(
             Input(type="hidden", name="tier_id", value=name),
             Button("Switch to Free", type="submit", class_="button"),
@@ -36,16 +38,30 @@ def PlanCard(tier: Dict[str, Any], user_subscription_tier: str, has_customer: bo
             action="/products/subscribe"
         )
     else:
+        # Paid plan - offer checkout or direct payment if they have a payment method
         button_attrs = {"type": "submit", "class": "button"}
         if not has_customer:
             button_attrs["title"] = "You need to add a payment method first"
-            
-        action_button = Form(
-            Input(type="hidden", name="tier_id", value=name),
-            Button("Subscribe", **button_attrs),
-            method="post",
-            action="/products/subscribe"
-        )
+        
+        # If they have a payment method, show both options
+        if has_customer:
+            # Form with two buttons - direct subscription and checkout
+            action_button = Form(
+                Input(type="hidden", name="tier_id", value=name),
+                Button("Subscribe with Saved Payment", type="submit", name="use_saved_payment", value="true", class_="button"),
+                " ", # Space between buttons
+                Button("Subscribe with New Payment", type="submit", class_="button"),
+                method="post",
+                action="/products/subscribe"
+            )
+        else:
+            # Just show the regular checkout button
+            action_button = Form(
+                Input(type="hidden", name="tier_id", value=name),
+                Button("Subscribe", **button_attrs),
+                method="post",
+                action="/products/subscribe"
+            )
     
     # Create the plan card
     return Div(
@@ -77,31 +93,60 @@ def TokenPurchaseForm(token_price: float, has_customer: bool) -> str:
             style="margin-bottom: 15px; padding: 10px; background-color: #fff3cd; border-radius: 4px; border-left: 4px solid #856404; color: #856404;"
         )
     
+    # Base button attributes
     button_attrs = {"type": "submit", "class": "button"}
     if not has_customer:
         button_attrs["title"] = "You need to add a payment method first"
-        
-    purchase_form = Form(
-        Div(
+    
+    # Create the purchase form
+    if has_customer:
+        # User has a payment method - show both options
+        purchase_form = Form(
             Div(
-                "Number of tokens to purchase:",
-                class_="label"
+                Div(
+                    "Number of tokens to purchase:",
+                    class_="label"
+                ),
+                Input(
+                    type="number",
+                    id="token_amount",
+                    name="token_amount",
+                    value="50",
+                    min="50",
+                    required=True
+                ),
+                Div("Minimum purchase: 50 tokens", class_="token-price"),
+                class_="form-group"
             ),
-            Input(
-                type="number",
-                id="token_amount",
-                name="token_amount",
-                value="50",
-                min="50",
-                required=True
+            Button("Buy with Saved Payment", type="submit", name="use_saved_payment", value="true", class_="button"),
+            " ", # Space between buttons
+            Button("Buy with New Payment", type="submit", class_="button"),
+            method="post",
+            action="/products/buy-tokens"
+        )
+    else:
+        # No payment method - just show regular checkout option
+        purchase_form = Form(
+            Div(
+                Div(
+                    "Number of tokens to purchase:",
+                    class_="label"
+                ),
+                Input(
+                    type="number",
+                    id="token_amount",
+                    name="token_amount",
+                    value="50",
+                    min="50",
+                    required=True
+                ),
+                Div("Minimum purchase: 50 tokens", class_="token-price"),
+                class_="form-group"
             ),
-            Div("Minimum purchase: 50 tokens", class_="token-price"),
-            class_="form-group"
-        ),
-        Button("Buy Tokens", **button_attrs),
-        method="post",
-        action="/products/buy-tokens"
-    )
+            Button("Buy Tokens", **button_attrs),
+            method="post",
+            action="/products/buy-tokens"
+        )
     
     return Div(
         H2("Buy Tokens"),
